@@ -1,21 +1,32 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import {
   ReactFlow,
-  MiniMap,
   Controls,
   Background,
   useNodesState,
   useEdgesState,
   Handle,
   Position,
-  NodeProps
+  type Node,
+  type NodeProps
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { getCirculars } from '../services/api';
-import { Database, Bot, ShieldCheck, Building2, Server } from 'lucide-react';
+import { getCirculars, getOverdueMAPs } from '../services/api';
+import { Database, Bot, ShieldCheck, Building2, Server, ShieldAlert } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+
+interface CustomNodeData extends Record<string, unknown> {
+  label: string;
+  icon?: React.ElementType;
+  className?: string;
+  handles?: string[];
+  badge?: string;
+}
+
+type CustomNodeType = Node<CustomNodeData, 'customNode'>;
 
 // Custom Node Component
-const AgentNode = ({ data, isConnectable }: NodeProps) => {
+const AgentNode = ({ data, isConnectable }: NodeProps<CustomNodeType>) => {
   const Icon = data.icon || Bot;
   return (
     <div className={`px-4 py-3 rounded-xl min-w-[180px] flex items-center space-x-3 ${data.className}`}>
@@ -79,29 +90,29 @@ const initialEdges = [
 
 export default function PipelineGraph() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes as any);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [edges, , onEdgesChange] = useEdgesState(initialEdges);
+  const [overdueCount, setOverdueCount] = useState(0);
+  const navigate = useNavigate();
 
   const fetchStatus = useCallback(async () => {
     try {
-      const circulars = await getCirculars();
+      const [circulars, overdue] = await Promise.all([getCirculars(), getOverdueMAPs()]);
       const parsedCount = circulars.filter((c: any) => c.status === 'parsed').length;
+      setOverdueCount(overdue.length);
       
       setNodes((nds) => 
         nds.map((node) => {
           if (node.id === 'agent-parse') {
-            return {
-              ...node,
-              data: {
-                ...node.data,
-                badge: parsedCount > 0 ? `Parsed: ${parsedCount}` : 'Idle'
-              }
-            };
+            return { ...node, data: { ...node.data, badge: parsedCount > 0 ? `Parsed: ${parsedCount}` : 'Idle' } };
+          }
+          if (node.id === 'agent-validate') {
+            return { ...node, data: { ...node.data, badge: overdue.length > 0 ? `⚠ ${overdue.length} Overdue` : 'Active' } };
           }
           return node;
         })
       );
     } catch (err) {
-      console.error("Failed to fetch circulars:", err);
+      console.error("Failed to fetch status:", err);
     }
   }, [setNodes]);
 
@@ -112,7 +123,20 @@ export default function PipelineGraph() {
   }, [fetchStatus]);
 
   return (
-    <div className="w-full h-full bg-gray-950">
+    <div className="w-full h-full bg-gray-950 relative">
+      {/* Overdue Alert Overlay */}
+      {overdueCount > 0 && (
+        <div
+          className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center space-x-3 bg-red-500/15 border border-red-500/40 backdrop-blur-sm px-5 py-3 rounded-xl shadow-xl cursor-pointer hover:bg-red-500/25 transition-colors"
+          onClick={() => navigate('/audit')}
+        >
+          <ShieldAlert size={18} className="text-red-400 flex-shrink-0" />
+          <span className="text-red-300 font-semibold text-sm">
+            Autonomous Monitor: {overdueCount} overdue MAP{overdueCount > 1 ? 's' : ''} detected
+          </span>
+          <span className="text-red-400/70 text-xs">→ View in Audit Report</span>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}

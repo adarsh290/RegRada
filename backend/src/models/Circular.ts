@@ -2,14 +2,18 @@ import mongoose, { Schema, Document } from "mongoose";
 
 // ── MAP Sub-document ───────────────────────────────────────
 export interface IMAP {
+  map_id: string;
   action_title: string;
   department: string;
   deadline: string;
   priority: "high" | "medium" | "low";
+  status: "pending" | "in_progress" | "submitted" | "verified" | "rejected";
+  assigned_to: string;
 }
 
 const MAPSchema = new Schema<IMAP>(
   {
+    map_id: { type: String, required: true },
     action_title: { type: String, required: true },
     department: { type: String, required: true },
     deadline: { type: String, required: true },
@@ -18,8 +22,14 @@ const MAPSchema = new Schema<IMAP>(
       enum: ["high", "medium", "low"],
       required: true,
     },
+    status: {
+      type: String,
+      enum: ["pending", "in_progress", "submitted", "verified", "rejected"],
+      default: "pending",
+    },
+    assigned_to: { type: String, required: true },
   },
-  { _id: false }
+  { _id: true }
 );
 
 // ── Circular Document ──────────────────────────────────────

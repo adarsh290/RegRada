@@ -2,7 +2,9 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
+import path from "path";
 import circularRoutes from "./routes/circularRoutes";
+import submissionRoutes from "./routes/submissionRoutes";
 
 dotenv.config();
 
@@ -15,6 +17,9 @@ const MONGODB_URI =
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
+// ── Static Files (uploaded proofs) ─────────────────────────
+app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+
 // ── Health Check ───────────────────────────────────────────
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "regradar-backend" });
@@ -22,6 +27,7 @@ app.get("/api/health", (_req, res) => {
 
 // ── Routes ─────────────────────────────────────────────────
 app.use("/api/circulars", circularRoutes);
+app.use("/api/submissions", submissionRoutes);
 
 // ── Database & Start ───────────────────────────────────────
 async function start() {

@@ -37,5 +37,44 @@ class CircularExtraction(BaseModel):
     )
     extraction_mode: str = Field(
         default="fallback",
-        description="How the extraction was performed: 'llm_openai', 'llm_local', or 'fallback'."
+        description="How the extraction was performed: 'llm_openai', 'llm_local', or 'fallback'.",
+    )
+
+
+# ── Validation Models ───────────────────────────────────────
+
+class ValidationVerdict(BaseModel):
+    """AI verdict on whether an uploaded proof satisfies a MAP requirement."""
+
+    is_compliant: bool = Field(
+        description="True if the proof document satisfactorily demonstrates compliance with the mandate."
+    )
+    confidence: float = Field(
+        description="Confidence score between 0.0 (no confidence) and 1.0 (certain).",
+        ge=0.0,
+        le=1.0,
+    )
+    reasoning: str = Field(
+        description="A brief explanation (2-3 sentences) of why the verdict was reached."
+    )
+    missing_items: List[str] = Field(
+        default_factory=list,
+        description="List of specific items required by the mandate that were NOT found in the proof. Empty if compliant.",
+    )
+    verdict: Literal["verified", "rejected"] = Field(
+        description="Final verdict: 'verified' if compliant, 'rejected' if not."
+    )
+
+
+class ValidationRequest(BaseModel):
+    """Input to the /validate endpoint."""
+
+    original_map_action: str = Field(
+        description="The original mandate text from the regulatory circular."
+    )
+    original_map_department: str = Field(
+        description="The department this MAP was assigned to."
+    )
+    proof_text: str = Field(
+        description="Text extracted from the uploaded proof document."
     )
