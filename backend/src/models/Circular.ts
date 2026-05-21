@@ -7,8 +7,17 @@ export interface IMAP {
   department: string;
   deadline: string;
   priority: "high" | "medium" | "low";
-  status: "pending" | "in_progress" | "submitted" | "verified" | "rejected";
+  status: "pending" | "in_progress" | "submitted" | "verified" | "rejected" | "escalated";
   assigned_to: string;
+  rejection_count: number;
+  audit_trail: { action: string; by: string; comment: string; timestamp: Date }[];
+}
+
+// ── Dependency Edge Sub-document ─────────────────────────
+export interface IDependencyEdge {
+  from_map_id: string;
+  to_map_id: string;
+  constraint: string;
 }
 
 const MAPSchema = new Schema<IMAP>(
@@ -24,10 +33,20 @@ const MAPSchema = new Schema<IMAP>(
     },
     status: {
       type: String,
-      enum: ["pending", "in_progress", "submitted", "verified", "rejected"],
+      enum: ["pending", "in_progress", "submitted", "verified", "rejected", "escalated"],
       default: "pending",
     },
     assigned_to: { type: String, required: true },
+    rejection_count: { type: Number, default: 0 },
+    audit_trail: {
+      type: [{
+        action: String,
+        by: String,
+        comment: String,
+        timestamp: { type: Date, default: Date.now },
+      }],
+      default: [],
+    },
   },
   { _id: true }
 );
@@ -42,6 +61,7 @@ export interface ICircular extends Document {
   status: "pending" | "parsed" | "reviewed" | "archived";
   date_published: Date;
   maps: IMAP[];
+  dependency_edges: IDependencyEdge[];
   created_at: Date;
   updated_at: Date;
 }
@@ -82,6 +102,14 @@ const CircularSchema = new Schema<ICircular>(
     },
     maps: {
       type: [MAPSchema],
+      default: [],
+    },
+    dependency_edges: {
+      type: [{
+        from_map_id: { type: String, required: true },
+        to_map_id: { type: String, required: true },
+        constraint: { type: String, required: true },
+      }],
       default: [],
     },
   },

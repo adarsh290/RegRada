@@ -1,5 +1,5 @@
 import { useState, useRef, type DragEvent } from 'react';
-import { X, UploadCloud, FileText, Loader2, CheckCircle2 } from 'lucide-react';
+import { X, UploadCloud, FileText, Loader2, CheckCircle2, Plus, Trash2 } from 'lucide-react';
 import { submitProof } from '../services/api';
 
 interface ProofUploadModalProps {
@@ -10,6 +10,10 @@ interface ProofUploadModalProps {
   onSuccess: () => void;
 }
 
+const ALLOWED = ['.pdf', '.txt', '.doc', '.docx'];
+const MAX_FILES = 5;
+const MAX_SIZE = 20 * 1024 * 1024; // 20 MB
+
 export default function ProofUploadModal({
   circularId,
   mapId,
@@ -17,7 +21,7 @@ export default function ProofUploadModal({
   onClose,
   onSuccess,
 }: ProofUploadModalProps) {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [notes, setNotes] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -25,59 +29,57 @@ export default function ProofUploadModal({
   const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const ALLOWED = ['.pdf', '.txt', '.doc', '.docx'];
-
-  const validateFile = (f: File) => {
+  const validateFile = (f: File): string | null => {
     const ext = '.' + f.name.split('.').pop()?.toLowerCase();
-    if (!ALLOWED.includes(ext)) {
-      setError('Only PDF, TXT, DOC, and DOCX files are allowed.');
-      return false;
+    if (!ALLOWED.includes(ext)) return 'Only PDF, TXT, DOC, DOCX files are allowed.';
+    if (f.size > MAX_SIZE) return `${f.name} exceeds the 20 MB limit.`;
+    return null;
+  };
+
+  const addFiles = (incoming: File[]) => {
+    setError('');
+    const toAdd: File[] = [];
+    for (const f of incoming) {
+      if (files.length + toAdd.length >= MAX_FILES) {
+        setError(`Maximum ${MAX_FILES} files allowed.`);
+        break;
+      }
+      const err = validateFile(f);
+      if (err) { setError(err); continue; }
+      if (!files.find(ex => ex.name === f.name)) toAdd.push(f);
     }
-    if (f.size > 20 * 1024 * 1024) {
-      setError('File must be under 20 MB.');
-      return false;
-    }
-    return true;
+    if (toAdd.length) setFiles(prev => [...prev, ...toAdd]);
   };
 
   const handleFileDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
-    const dropped = e.dataTransfer.files[0];
-    if (dropped && validateFile(dropped)) {
-      setFile(dropped);
-      setError('');
-    }
+    addFiles(Array.from(e.dataTransfer.files));
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = e.target.files?.[0];
-    if (selected && validateFile(selected)) {
-      setFile(selected);
-      setError('');
-    }
+    if (e.target.files) addFiles(Array.from(e.target.files));
+    e.target.value = '';
   };
 
+  const removeFile = (name: string) => setFiles(prev => prev.filter(f => f.name !== name));
+
   const handleSubmit = async () => {
-    if (!file) {
-      setError('Please select a proof document.');
+    if (files.length === 0) {
+      setError('Please select at least one proof document.');
       return;
     }
     setError('');
     setIsSubmitting(true);
-
     try {
       const formData = new FormData();
-      formData.append('proof_file', file);
+      files.forEach(f => formData.append('proof_files', f));
       formData.append('circular_id', circularId);
       formData.append('map_id', mapId);
       formData.append('notes', notes);
       await submitProof(formData);
       setIsDone(true);
-      setTimeout(() => {
-        onSuccess();
-        onClose();
-      }, 1500);
+      setTimeout(() => { onSuccess(); onClose(); }, 1500);
     } catch (err: any) {
       setError(err.response?.data?.error || 'Submission failed. Please try again.');
     } finally {
@@ -100,30 +102,27 @@ export default function ProofUploadModal({
         </div>
 
         <div className="p-6 space-y-5">
-          {/* MAP ID badge */}
           <div className="flex items-center space-x-2">
             <span className="text-xs text-gray-500">Action Point:</span>
             <span className="px-2 py-1 bg-gray-800 text-gray-300 text-xs font-mono rounded border border-gray-700">{mapId}</span>
+            <span className="text-xs text-gray-500 ml-auto">Up to {MAX_FILES} files</span>
           </div>
 
           {/* Drop Zone */}
           <div
-            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleFileDrop}
             onClick={() => fileInputRef.current?.click()}
-            className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
-              isDragging
-                ? 'border-blue-500 bg-blue-500/5'
-                : file
-                ? 'border-emerald-500/50 bg-emerald-500/5'
-                : 'border-gray-700 hover:border-gray-500 hover:bg-gray-800/50'
+            className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
+              isDragging ? 'border-blue-500 bg-blue-500/5' : 'border-gray-700 hover:border-gray-500 hover:bg-gray-800/50'
             }`}
           >
             <input
               ref={fileInputRef}
               type="file"
               accept=".pdf,.txt,.doc,.docx"
+              multiple
               className="hidden"
               onChange={handleFileSelect}
             />
@@ -132,60 +131,69 @@ export default function ProofUploadModal({
                 <CheckCircle2 size={40} className="mb-3" />
                 <p className="font-semibold">Submitted Successfully!</p>
               </div>
-            ) : file ? (
-              <div className="flex flex-col items-center">
-                <FileText size={36} className="text-emerald-400 mb-3" />
-                <p className="font-semibold text-white">{file.name}</p>
-                <p className="text-gray-500 text-xs mt-1">{(file.size / 1024).toFixed(1)} KB · Click to change</p>
-              </div>
             ) : (
               <div className="flex flex-col items-center text-gray-500">
-                <UploadCloud size={36} className="mb-3" />
-                <p className="font-medium text-gray-300">Drop file here or click to browse</p>
-                <p className="text-xs mt-1">PDF, TXT, DOC, DOCX · Max 20 MB</p>
+                <UploadCloud size={32} className="mb-3" />
+                <p className="font-medium text-gray-300">Drop files here or click to browse</p>
+                <p className="text-xs mt-1">PDF, TXT, DOC, DOCX · Max 20 MB each</p>
               </div>
             )}
           </div>
+
+          {/* File List */}
+          {files.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Selected Files ({files.length})</p>
+              {files.map(f => (
+                <div key={f.name} className="flex items-center justify-between bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+                  <div className="flex items-center space-x-2 min-w-0">
+                    <FileText size={14} className="text-blue-400 shrink-0" />
+                    <span className="text-sm text-white truncate">{f.name}</span>
+                    <span className="text-xs text-gray-500 shrink-0">{(f.size / 1024).toFixed(1)} KB</span>
+                  </div>
+                  <button onClick={() => removeFile(f.name)} className="text-gray-600 hover:text-red-400 transition-colors ml-2 shrink-0">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+              {files.length < MAX_FILES && (
+                <button onClick={() => fileInputRef.current?.click()} className="flex items-center space-x-1 text-xs text-blue-400 hover:text-blue-300 transition-colors">
+                  <Plus size={14} /><span>Add another file</span>
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Notes */}
           <div className="space-y-2">
             <label className="text-sm font-medium text-gray-300">Notes (optional)</label>
             <textarea
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={e => setNotes(e.target.value)}
               placeholder="e.g. Updated the policy document as per circular requirements..."
               rows={3}
               className="w-full bg-gray-950 border border-gray-800 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm resize-none"
             />
           </div>
 
-          {/* Error */}
           {error && (
-            <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">
-              {error}
-            </p>
+            <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">{error}</p>
           )}
 
           {/* Actions */}
           <div className="flex space-x-3 pt-2">
-            <button
-              onClick={onClose}
-              className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium rounded-lg px-4 py-2.5 transition-colors"
-            >
+            <button onClick={onClose} className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium rounded-lg px-4 py-2.5 transition-colors">
               Cancel
             </button>
             <button
               onClick={handleSubmit}
-              disabled={isSubmitting || isDone}
+              disabled={isSubmitting || isDone || files.length === 0}
               className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-lg px-4 py-2.5 flex items-center justify-center space-x-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  <span>Submitting...</span>
-                </>
+                <><Loader2 size={18} className="animate-spin" /><span>Submitting...</span></>
               ) : (
-                <span>Submit Proof</span>
+                <span>Submit {files.length > 1 ? `${files.length} Files` : "Proof"}</span>
               )}
             </button>
           </div>

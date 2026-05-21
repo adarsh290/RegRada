@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getSubmissions, getOverdueMAPs } from '../services/api';
+import { getSubmissions, getOverdueMAPs, getCirculars } from '../services/api';
 import {
   CheckCircle2, XCircle, AlertCircle, FileText, ChevronRight,
   BrainCircuit, Calendar, FileSearch, Clock, Flame, Building2, ShieldAlert
@@ -12,6 +12,21 @@ interface AIVerdict {
   missing_items: string[];
   verdict: 'verified' | 'rejected';
   evaluated_at: string;
+}
+
+interface MAPWithCircular {
+  _id?: string;
+  circular_id: string;
+  circular_title: string;
+  circular_source: string;
+  map_id: string;
+  action_title: string;
+  department: string;
+  deadline: string;
+  priority: string;
+  status: string;
+  assigned_to: string;
+  audit_trail?: { action: string; by: string; comment: string; timestamp: string }[];
 }
 
 interface Submission {
@@ -45,9 +60,15 @@ type ActiveTab = 'submissions' | 'overdue';
 export default function AuditDashboard() {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [overdueMaps, setOverdueMaps] = useState<OverdueMAP[]>([]);
+  const [escalatedMaps, setEscalatedMaps] = useState<MAPWithCircular[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedSub, setSelectedSub] = useState<Submission | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('submissions');
+  
+  const [overrideComment, setOverrideComment] = useState("");
+  const [overriding, setOverriding] = useState(false);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [assignDept, setAssignDept] = useState("");
 
   useEffect(() => {
     fetchAll();
@@ -55,9 +76,17 @@ export default function AuditDashboard() {
 
   const fetchAll = async () => {
     try {
-      const [subs, overdue] = await Promise.all([getSubmissions(), getOverdueMAPs()]);
+      const [subs, overdue, circulars] = await Promise.all([getSubmissions(), getOverdueMAPs(), getCirculars()]);
       setSubmissions(subs);
       setOverdueMaps(overdue);
+
+      const escalated: MAPWithCircular[] = [];
+      (circulars as any[]).forEach(circ => {
+        circ.maps.filter((m: any) => m.status === 'escalated').forEach((m: any) => {
+          escalated.push({ ...m, circular_id: circ._id, circular_title: circ.title, circular_source: circ.source });
+        });
+      });
+      setEscalatedMaps(escalated);
     } catch (error) {
       console.error("Failed to fetch audit data:", error);
     } finally {
@@ -68,8 +97,39 @@ export default function AuditDashboard() {
   const total = submissions.length;
   const verifiedCount = submissions.filter(s => s.status === 'verified').length;
   const rejectedCount = submissions.filter(s => s.status === 'rejected').length;
-  const avgConfidence = submissions.reduce((acc, curr) => acc + (curr.ai_verdict?.confidence || 0), 0)
-    / (submissions.filter(s => s.ai_verdict).length || 1);
+
+  const handleOverride = async (verdict: 'verified' | 'rejected') => {
+    if (!selectedSub || !overrideComment.trim()) return;
+    setOverriding(true);
+    try {
+      const axios = (await import('axios')).default;
+      await axios.put(`http://localhost:5000/api/submissions/${selectedSub._id}/override`, { verdict, comment: overrideComment });
+      setOverrideComment("");
+      setSelectedSub(null);
+      fetchAll();
+    } catch (err) {
+      console.error('Failed to override:', err);
+      alert('Failed to override submission.');
+    } finally {
+      setOverriding(false);
+    }
+  };
+
+  const handleAssign = async (map: MAPWithCircular) => {
+    if (!assignDept.trim()) return;
+    setAssigningId(map.map_id);
+    try {
+      const axios = (await import('axios')).default;
+      await axios.put(`http://localhost:5000/api/circulars/${map.circular_id}/maps/${map.map_id}/assign`, { assigned_to: assignDept });
+      setAssignDept("");
+      fetchAll();
+    } catch (err) {
+      console.error('Failed to assign:', err);
+      alert('Failed to assign department.');
+    } finally {
+      setAssigningId(null);
+    }
+  };
 
   const getStatusBadge = (status: string, ai_verdict?: AIVerdict) => {
     if (status === 'verified') {
@@ -158,6 +218,62 @@ export default function AuditDashboard() {
           >
             View Overdue →
           </button>
+        </div>
+      )}
+
+      {/* Escalated Action Required Banner */}
+      {escalatedMaps.length > 0 && (
+        <div className="mb-6 bg-amber-500/10 border border-amber-500/30 rounded-xl p-6">
+          <div className="flex items-center space-x-3 mb-4">
+            <div className="p-2 bg-amber-500/20 rounded-lg">
+              <AlertCircle size={22} className="text-amber-400" />
+            </div>
+            <div>
+              <h3 className="text-amber-400 font-bold text-base">
+                Action Required: {escalatedMaps.length} Disputed MAP{escalatedMaps.length > 1 ? 's' : ''}
+              </h3>
+              <p className="text-amber-300/70 text-sm mt-0.5">
+                Departments have repeatedly rejected these assignments. Please manually assign the correct department.
+              </p>
+            </div>
+          </div>
+          <div className="space-y-4 mt-4">
+            {escalatedMaps.map(map => (
+              <div key={map.map_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center space-x-2 mb-1">
+                    <span className="font-mono text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700">{map.map_id}</span>
+                    <span className="text-xs text-gray-400">{map.circular_source} · {map.circular_title}</span>
+                  </div>
+                  <p className="text-sm font-semibold text-gray-200 mb-2">{map.action_title}</p>
+                  {map.audit_trail && map.audit_trail.length > 0 && (
+                    <div className="text-xs text-amber-400/80 bg-amber-500/5 p-2 rounded border border-amber-500/10">
+                      <span className="font-bold">Last Rejection:</span> {map.audit_trail[map.audit_trail.length - 1].comment}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center space-x-2 w-full sm:w-auto">
+                  <input 
+                    type="text" 
+                    placeholder="Dept Name (e.g., IT Dept)"
+                    className="bg-gray-950 border border-gray-700 rounded p-2 text-sm text-white w-48"
+                    value={assigningId === map.map_id ? assignDept : ""}
+                    onChange={(e) => {
+                      setAssigningId(map.map_id);
+                      setAssignDept(e.target.value);
+                    }}
+                  />
+                  <button 
+                    onClick={() => handleAssign(map)}
+                    disabled={assigningId === map.map_id ? !assignDept.trim() : true}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold px-4 py-2 rounded transition-colors"
+                  >
+                    Force Assign
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -282,6 +398,36 @@ export default function AuditDashboard() {
                   <span className="text-sm font-medium text-gray-300">{selectedSub.department}</span>
                 </div>
               </div>
+
+              {/* CO Override Section */}
+              <div className="border-t border-gray-800 pt-5 mt-5">
+                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Compliance Officer Override</h4>
+                <div className="flex flex-col space-y-3">
+                  <input 
+                    type="text" 
+                    placeholder="Reason for overriding the AI verdict..."
+                    className="bg-gray-950 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 outline-none w-full"
+                    value={overrideComment}
+                    onChange={(e) => setOverrideComment(e.target.value)}
+                  />
+                  <div className="flex space-x-3">
+                    <button 
+                      onClick={() => handleOverride('verified')}
+                      disabled={overriding || !overrideComment.trim() || selectedSub.status === 'verified'}
+                      className="flex-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 font-bold px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+                    >
+                      Force Verify
+                    </button>
+                    <button 
+                      onClick={() => handleOverride('rejected')}
+                      disabled={overriding || !overrideComment.trim() || selectedSub.status === 'rejected'}
+                      className="flex-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 font-bold px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+                    >
+                      Force Reject
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -297,7 +443,7 @@ function SubmissionsTable({
   onSelect,
 }: {
   submissions: Submission[];
-  getStatusBadge: (status: string, verdict?: AIVerdict) => JSX.Element;
+  getStatusBadge: (status: string, verdict?: AIVerdict) => React.ReactNode;
   onSelect: (s: Submission) => void;
 }) {
   return (

@@ -5,6 +5,7 @@ import {
   submitProof,
   getSubmissions,
   getSubmissionsByCircular,
+  overrideSubmissionVerdict,
 } from "../controllers/submissionController";
 
 // ── Multer Storage ──────────────────────────────────────────
@@ -35,13 +36,16 @@ const upload = multer({
 
 const router = Router();
 
-// POST /api/submissions — upload proof of compliance
-router.post("/", upload.single("proof_file"), submitProof);
+// POST /api/submissions — upload proof of compliance (up to 5 files)
+router.post("/", upload.array("proof_files", 5), submitProof);
 
 // GET /api/submissions — fetch submissions (optional ?department=)
 router.get("/", getSubmissions);
 
 // GET /api/submissions/circular/:circularId — fetch by circular
 router.get("/circular/:circularId", getSubmissionsByCircular);
+
+// PUT /api/submissions/:id/override
+router.put("/:id/override", overrideSubmissionVerdict);
 
 export default router;

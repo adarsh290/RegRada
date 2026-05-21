@@ -39,6 +39,33 @@ class CircularExtraction(BaseModel):
         default="fallback",
         description="How the extraction was performed: 'llm_openai', 'llm_local', or 'fallback'.",
     )
+    scraped_url: str = Field(
+        default="",
+        description="The URL of the circular if it was autonomously scraped."
+    )
+
+
+# ── Dependency Detection Models ─────────────────────────────
+
+class DependencyEdge(BaseModel):
+    """A single sequencing constraint between two MAPs."""
+    from_map_index: int = Field(
+        description="Zero-based index of the MAP that must be completed first."
+    )
+    to_map_index: int = Field(
+        description="Zero-based index of the MAP that is blocked until the first is done."
+    )
+    constraint: str = Field(
+        description="One clear sentence explaining why this sequencing constraint exists."
+    )
+
+
+class DependencyResult(BaseModel):
+    """Structured list of sequencing dependencies between MAPs."""
+    edges: List[DependencyEdge] = Field(
+        default=[],
+        description="All detected sequencing dependencies. Empty list if none exist."
+    )
 
 
 # ── Validation Models ───────────────────────────────────────
@@ -64,6 +91,24 @@ class ValidationVerdict(BaseModel):
     verdict: Literal["verified", "rejected"] = Field(
         description="Final verdict: 'verified' if compliant, 'rejected' if not."
     )
+
+
+class ReevaluationVerdict(BaseModel):
+    """AI verdict after re-evaluating a rejected MAP."""
+
+    assigned_department: str = Field(
+        description="The department the task should be assigned to after re-evaluation."
+    )
+    reasoning: str = Field(
+        description="A brief explanation (2-3 sentences) of why the task was assigned to this department."
+    )
+
+class ReevaluateRequest(BaseModel):
+    """Input to the /reevaluate endpoint."""
+
+    action_title: str
+    current_department: str
+    rejection_reason: str
 
 
 class ValidationRequest(BaseModel):

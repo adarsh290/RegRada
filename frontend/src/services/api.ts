@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: "http://localhost:5000/api",
+  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api",
 });
 
 export const getCirculars = async () => {
@@ -41,6 +41,27 @@ export const getSubmissions = async (department?: string) => {
 
 export const getOverdueMAPs = async () => {
   const response = await api.get("/circulars/overdue");
+  return response.data;
+};
+
+// ── Sources API ─────────────────────────────────────────────
+export const getSources = async () => {
+  const response = await api.get("/sources");
+  return response.data;
+};
+
+export const addSource = async (data: { name: string; url: string }) => {
+  const response = await api.post("/sources", data);
+  return response.data;
+};
+
+export const scrapeSource = async (id: string) => {
+  const response = await api.post(`/sources/${id}/scrape`);
+  return response.data;
+};
+
+export const getObligationGraph = async (circularId: string) => {
+  const response = await api.get(`/circulars/${circularId}/obligation-graph`);
   return response.data;
 };
 

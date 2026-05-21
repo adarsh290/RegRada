@@ -16,12 +16,12 @@ export interface ISubmission extends Document {
   map_id: string;
   map_action: string;
   department: string;
-  file_path: string;
-  original_filename: string;
-  file_size: number;
+  proof_files: { file_path: string; original_filename: string; file_size: number }[];
   notes: string;
   status: "submitted" | "verified" | "rejected";
   ai_verdict?: IAIVerdict;
+  overridden_by_co: boolean;
+  co_comment: string;
   submitted_at: Date;
   reviewed_at?: Date;
   created_at: Date;
@@ -51,9 +51,14 @@ const SubmissionSchema = new Schema<ISubmission>(
     map_id: { type: String, required: true },
     map_action: { type: String, required: true },
     department: { type: String, required: true },
-    file_path: { type: String, required: true },
-    original_filename: { type: String, required: true },
-    file_size: { type: Number, required: true },
+    proof_files: {
+      type: [{
+        file_path: { type: String, required: true },
+        original_filename: { type: String, required: true },
+        file_size: { type: Number, required: true },
+      }],
+      default: [],
+    },
     notes: { type: String, default: "" },
     status: {
       type: String,
@@ -61,6 +66,8 @@ const SubmissionSchema = new Schema<ISubmission>(
       default: "submitted",
     },
     ai_verdict: { type: AIVerdictSchema },
+    overridden_by_co: { type: Boolean, default: false },
+    co_comment: { type: String, default: "" },
     submitted_at: { type: Date, default: Date.now },
     reviewed_at: { type: Date },
   },

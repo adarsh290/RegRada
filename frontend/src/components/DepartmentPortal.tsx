@@ -15,6 +15,7 @@ interface MAP {
   priority: 'high' | 'medium' | 'low';
   status: string;
   assigned_to: string;
+  audit_trail?: { action: string; by: string; comment: string; timestamp: string }[];
 }
 
 interface Circular {
@@ -57,6 +58,9 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploadTarget, setUploadTarget] = useState<MAPWithCircular | null>(null);
+  const [rejectTarget, setRejectTarget] = useState<MAPWithCircular | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -96,6 +100,23 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
 
   const getSubmissionForMap = (circularId: string, mapId: string) =>
     submissions.find((s) => s.circular_id === circularId && s.map_id === mapId);
+
+  const handleReject = async () => {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    setRejecting(true);
+    try {
+      const axios = (await import('axios')).default;
+      await axios.post(`http://localhost:5000/api/circulars/${rejectTarget.circular_id}/maps/${rejectTarget.map_id}/reject`, { reason: rejectReason });
+      setRejectTarget(null);
+      setRejectReason('');
+      fetchData();
+    } catch (err) {
+      console.error('Failed to reject task:', err);
+      alert('Failed to reject task. Please try again.');
+    } finally {
+      setRejecting(false);
+    }
+  };
 
   const stats = {
     total: myMaps.length,
@@ -275,14 +296,37 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
                       )}
                     </div>
                   ) : (
-                    <button
-                      onClick={() => setUploadTarget(map)}
-                      disabled={map.status === 'verified'}
-                      className="w-full flex items-center justify-center space-x-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 font-medium rounded-lg px-4 py-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <Upload size={16} />
-                      <span>Upload Proof of Compliance</span>
-                    </button>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => setUploadTarget(map)}
+                        disabled={map.status === 'verified'}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 font-medium rounded-lg px-4 py-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Upload size={16} />
+                        <span>Upload Proof of Compliance</span>
+                      </button>
+                      <button
+                        onClick={() => setRejectTarget(map)}
+                        disabled={map.status === 'verified'}
+                        className="flex-1 flex items-center justify-center space-x-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 font-medium rounded-lg px-4 py-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <XCircle size={16} />
+                        <span>Reject Task</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Audit Trail Feedback */}
+                  {map.audit_trail && map.audit_trail.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <h5 className="text-xs font-bold text-gray-500 uppercase">Audit Trail:</h5>
+                      {map.audit_trail.map((log, idx) => (
+                        <div key={idx} className="bg-gray-950 p-3 rounded-lg border border-gray-800 text-sm">
+                          <span className="font-semibold text-blue-400">{log.action}</span> by {log.by}:
+                          <p className="text-gray-300 mt-1 italic">{log.comment}</p>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               );
@@ -300,6 +344,51 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
           onClose={() => setUploadTarget(null)}
           onSuccess={fetchData}
         />
+      )}
+
+      {/* Reject Modal */}
+      {rejectTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-gray-900 border border-red-500/30 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
+            <div className="p-6 border-b border-gray-800">
+              <h3 className="text-lg font-bold text-red-400 flex items-center">
+                <AlertCircle size={20} className="mr-2" />
+                Reject Task: {rejectTarget.map_id}
+              </h3>
+            </div>
+            <div className="p-6">
+              <p className="text-gray-300 text-sm mb-4">Please provide a reason for rejecting this task. The AI will re-evaluate its assignment based on your feedback.</p>
+              <textarea
+                className="w-full bg-gray-950 border border-gray-700 rounded-lg p-3 text-white focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none transition-colors"
+                rows={4}
+                placeholder="E.g., This system was decommissioned, or this falls under the Legal department's purview."
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+              />
+            </div>
+            <div className="p-6 border-t border-gray-800 flex justify-end space-x-3 bg-gray-950/50">
+              <button
+                onClick={() => setRejectTarget(null)}
+                className="px-4 py-2 text-gray-400 hover:text-white font-medium"
+                disabled={rejecting}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReject}
+                disabled={rejecting || !rejectReason.trim()}
+                className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg transition-colors disabled:opacity-50 flex items-center"
+              >
+                {rejecting ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                    Rejecting...
+                  </>
+                ) : 'Submit Rejection'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -5,6 +5,9 @@ import dotenv from "dotenv";
 import path from "path";
 import circularRoutes from "./routes/circularRoutes";
 import submissionRoutes from "./routes/submissionRoutes";
+import sourceRoutes from "./routes/sourceRoutes";
+import authRoutes from "./routes/authRoutes";
+import { startCronService } from "./services/cronService";
 
 dotenv.config();
 
@@ -26,15 +29,17 @@ app.get("/api/health", (_req, res) => {
 });
 
 // ── Routes ─────────────────────────────────────────────────
+app.use("/api/auth", authRoutes);
 app.use("/api/circulars", circularRoutes);
 app.use("/api/submissions", submissionRoutes);
+app.use("/api/sources", sourceRoutes);
 
 // ── Database & Start ───────────────────────────────────────
 async function start() {
   try {
     await mongoose.connect(MONGODB_URI);
     console.log("✅ Connected to MongoDB");
-
+    startCronService();
     app.listen(PORT, () => {
       console.log(`🚀 Backend running on http://localhost:${PORT}`);
     });

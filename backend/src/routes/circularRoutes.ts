@@ -7,6 +7,9 @@ import {
   getCirculars,
   getCircularById,
   getOverdueMAPs,
+  getObligationGraph,
+  rejectMAP,
+  assignMAP,
 } from "../controllers/circularController";
 
 const router = Router();
@@ -46,7 +49,16 @@ router.post("/upload-pdf", uploadPDF.single("pdf_file"), ingestCircularPDF);
 // GET /api/circulars — fetch all circulars
 router.get("/", getCirculars);
 
+// GET /api/circulars/:id/obligation-graph — obligation DAG (MUST be before /:id)
+router.get("/:id/obligation-graph", getObligationGraph);
+
 // GET /api/circulars/:id — fetch single circular
 router.get("/:id", getCircularById);
+
+// POST /api/circulars/:circularId/maps/:mapId/reject
+router.post("/:circularId/maps/:mapId/reject", rejectMAP);
+
+// PUT /api/circulars/:circularId/maps/:mapId/assign
+router.put("/:circularId/maps/:mapId/assign", assignMAP);
 
 export default router;

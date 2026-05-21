@@ -12,6 +12,42 @@ interface AIExtractionResponse {
   extraction_mode: string;
 }
 
+interface AIDepEdge {
+  from_map_index: number;
+  to_map_index: number;
+  constraint: string;
+}
+
+/**
+ * Calls the AI service to detect sequencing dependencies between MAPs.
+ * Returns an array of edges using real map_ids (not indices).
+ */
+async function callDependencyDetection(
+  maps: IMAP[]
+): Promise<Array<{ from_map_id: string; to_map_id: string; constraint: string }>> {
+  try {
+    const payload = maps.slice(0, 10).map((m, i) => ({
+      index: i,
+      title: m.action_title,
+      department: m.department,
+    }));
+
+    const res = await axios.post(`${AI_SERVICE_URL}/detect-dependencies`, { maps: payload });
+    const edges: AIDepEdge[] = res.data.edges || [];
+
+    return edges
+      .filter((e) => e.from_map_index < maps.length && e.to_map_index < maps.length)
+      .map((e) => ({
+        from_map_id: maps[e.from_map_index].map_id,
+        to_map_id: maps[e.to_map_index].map_id,
+        constraint: e.constraint,
+      }));
+  } catch (err) {
+    console.warn("⚠️  Dependency detection failed — saving circular without edges.", err);
+    return [];
+  }
+}
+
 /**
  * POST /api/circulars
  *
@@ -76,6 +112,14 @@ export async function ingestCircular(req: Request, res: Response) {
 
     await circular.save();
     console.log(`💾 Circular saved: ${circular._id}`);
+
+    // Async dependency detection — don't block response
+    const depEdges = await callDependencyDetection(mappedMaps as unknown as IMAP[]);
+    if (depEdges.length > 0) {
+      circular.dependency_edges = depEdges;
+      await circular.save();
+      console.log(`🔗 Saved ${depEdges.length} dependency edges`);
+    }
 
     res.status(201).json({
       message: "Circular ingested and parsed successfully",
@@ -147,6 +191,14 @@ export async function ingestCircularPDF(req: Request, res: Response) {
 
     await circular.save();
     console.log(`💾 PDF Circular saved: ${circular._id}`);
+
+    // Async dependency detection
+    const depEdges = await callDependencyDetection(mappedMaps as unknown as IMAP[]);
+    if (depEdges.length > 0) {
+      circular.dependency_edges = depEdges;
+      await circular.save();
+      console.log(`🔗 Saved ${depEdges.length} dependency edges for PDF circular`);
+    }
 
     // Clean up the temp uploaded file
     fs.unlinkSync(file.path);
@@ -258,6 +310,181 @@ export async function getOverdueMAPs(req: Request, res: Response) {
     res.json(overdue);
   } catch (err) {
     console.error("❌ getOverdueMAPs error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * GET /api/circulars/:id/obligation-graph
+ *
+ * Returns the obligation DAG for a circular:
+ * nodes = MAPs, edges = dependency edges with constraint labels.
+ * Each node includes a `blocked` flag (true if any predecessor is not verified).
+ */
+export async function getObligationGraph(req: Request, res: Response) {
+  try {
+    const circular = await Circular.findById(req.params.id);
+    if (!circular) {
+      res.status(404).json({ error: "Circular not found" });
+      return;
+    }
+
+    // Build a set of verified map_ids for blocking logic
+    const verifiedIds = new Set(
+      circular.maps.filter((m) => m.status === "verified").map((m) => m.map_id)
+    );
+
+    // Build a set of map_ids that have unverified predecessors (blocked)
+    const blockedIds = new Set<string>();
+    for (const edge of circular.dependency_edges) {
+      if (!verifiedIds.has(edge.from_map_id)) {
+        blockedIds.add(edge.to_map_id);
+      }
+    }
+
+    const nodes = circular.maps.map((m) => ({
+      id: m.map_id,
+      action_title: m.action_title,
+      department: m.department,
+      deadline: m.deadline,
+      priority: m.priority,
+      status: m.status,
+      blocked: blockedIds.has(m.map_id),
+    }));
+
+    const edges = circular.dependency_edges.map((e, idx) => ({
+      id: `dep-${idx}`,
+      from_map_id: e.from_map_id,
+      to_map_id: e.to_map_id,
+      constraint: e.constraint,
+    }));
+
+    res.json({
+      circular_id: (circular._id as any).toString(),
+      title: circular.title,
+      source: circular.source,
+      nodes,
+      edges,
+    });
+  } catch (err) {
+    console.error("❌ getObligationGraph error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * POST /api/circulars/:circularId/maps/:mapId/reject
+ */
+export async function rejectMAP(req: Request, res: Response) {
+  try {
+    const { circularId, mapId } = req.params;
+    const { reason } = req.body;
+    
+    if (!reason) {
+      res.status(400).json({ error: "Missing required field: reason" });
+      return;
+    }
+
+    const circular = await Circular.findById(circularId);
+    if (!circular) {
+      res.status(404).json({ error: "Circular not found" });
+      return;
+    }
+
+    const map = circular.maps.find((m) => m.map_id === mapId);
+    if (!map) {
+      res.status(404).json({ error: "MAP not found" });
+      return;
+    }
+
+    map.rejection_count = (map.rejection_count || 0) + 1;
+    
+    map.audit_trail.push({
+      action: "Rejected",
+      by: map.assigned_to || map.department,
+      comment: reason,
+      timestamp: new Date()
+    });
+
+    if (map.rejection_count >= 2) {
+      map.status = "escalated";
+      await circular.save();
+      res.json({ message: "Task escalated to Compliance Officer", map });
+      return;
+    }
+
+    // Call AI to re-evaluate
+    try {
+      const aiResponse = await axios.post(`${AI_SERVICE_URL}/reevaluate`, {
+        action_title: map.action_title,
+        current_department: map.assigned_to || map.department,
+        rejection_reason: reason
+      });
+      
+      const { assigned_department, reasoning } = aiResponse.data;
+      
+      map.assigned_to = assigned_department;
+      map.department = assigned_department;
+      
+      map.audit_trail.push({
+        action: "AI Re-evaluation",
+        by: "AI System",
+        comment: `Reassigned to ${assigned_department}. Reasoning: ${reasoning}`,
+        timestamp: new Date()
+      });
+      
+      await circular.save();
+      res.json({ message: "Task re-evaluated by AI", map });
+    } catch (aiErr: any) {
+      console.error("❌ AI Re-evaluation failed:", aiErr.message);
+      res.status(502).json({ error: "AI Re-evaluation failed" });
+    }
+  } catch (err) {
+    console.error("❌ rejectMAP error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * PUT /api/circulars/:circularId/maps/:mapId/assign
+ */
+export async function assignMAP(req: Request, res: Response) {
+  try {
+    const { circularId, mapId } = req.params;
+    const { assigned_to } = req.body;
+    
+    if (!assigned_to) {
+      res.status(400).json({ error: "Missing required field: assigned_to" });
+      return;
+    }
+
+    const circular = await Circular.findById(circularId);
+    if (!circular) {
+      res.status(404).json({ error: "Circular not found" });
+      return;
+    }
+
+    const map = circular.maps.find((m) => m.map_id === mapId);
+    if (!map) {
+      res.status(404).json({ error: "MAP not found" });
+      return;
+    }
+
+    map.assigned_to = assigned_to;
+    map.department = assigned_to;
+    map.status = "pending";
+    
+    map.audit_trail.push({
+      action: "Manual Override",
+      by: "Compliance Officer",
+      comment: `Force assigned to ${assigned_to}`,
+      timestamp: new Date()
+    });
+
+    await circular.save();
+    res.json({ message: "Task successfully assigned", map });
+  } catch (err) {
+    console.error("❌ assignMAP error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 }

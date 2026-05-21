@@ -15,14 +15,14 @@ import Submission from "../models/Submission";
 export async function submitProof(req: Request, res: Response) {
   try {
     const { circular_id, map_id, notes } = req.body;
-    const file = req.file;
+    const files = req.files as Express.Multer.File[];
 
     if (!circular_id || !map_id) {
       res.status(400).json({ error: "Missing required fields: circular_id, map_id" });
       return;
     }
-    if (!file) {
-      res.status(400).json({ error: "No file uploaded" });
+    if (!files || files.length === 0) {
+      res.status(400).json({ error: "No files uploaded" });
       return;
     }
 
@@ -39,16 +39,14 @@ export async function submitProof(req: Request, res: Response) {
       return;
     }
 
-    // ── Create Submission record ───────────────────────────
+    // ── Create Submission record ───────────────────────
     const submission = new Submission({
       circular_id: circular._id,
       circular_title: circular.title,
       map_id,
       map_action: map.action_title,
       department: map.department,
-      file_path: file.path,
-      original_filename: file.originalname,
-      file_size: file.size,
+      proof_files: files.map(f => ({ file_path: f.path, original_filename: f.originalname, file_size: f.size })),
       notes: notes || "",
       status: "submitted",
       submitted_at: new Date(),
@@ -56,11 +54,11 @@ export async function submitProof(req: Request, res: Response) {
 
     await submission.save();
 
-    // ── Run AI Validation ──────────────────────────────────
-    console.log(`🤖 Starting AI Validation for ${submission._id}...`);
+    // ── Run AI Validation (concatenate all doc text) ────────────
+    console.log(`🤖 Starting AI Validation for ${submission._id} with ${files.length} file(s)...`);
     try {
       const form = new FormData();
-      form.append("proof_file", fs.createReadStream(file.path), file.originalname);
+      files.forEach(f => form.append("proof_files", fs.createReadStream(f.path), f.originalname));
       form.append("original_map_action", map.action_title);
       form.append("original_map_department", map.department);
 
@@ -129,6 +127,55 @@ export async function getSubmissionsByCircular(req: Request, res: Response) {
     res.json(submissions);
   } catch (err) {
     console.error("❌ getSubmissionsByCircular error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * PUT /api/submissions/:id/override
+ */
+export async function overrideSubmissionVerdict(req: Request, res: Response) {
+  try {
+    const { id } = req.params;
+    const { verdict, comment } = req.body;
+
+    if (!verdict || !["verified", "rejected"].includes(verdict)) {
+      res.status(400).json({ error: "Invalid verdict. Must be 'verified' or 'rejected'" });
+      return;
+    }
+
+    const submission = await Submission.findById(id);
+    if (!submission) {
+      res.status(404).json({ error: "Submission not found" });
+      return;
+    }
+
+    submission.status = verdict;
+    submission.overridden_by_co = true;
+    submission.co_comment = comment || "";
+    await submission.save();
+
+    // Update parent Circular MAP status
+    const circular = await Circular.findById(submission.circular_id);
+    if (circular) {
+      const map = circular.maps.find((m) => m.map_id === submission.map_id);
+      if (map) {
+        map.status = verdict;
+        
+        map.audit_trail.push({
+          action: "Verdict Overridden",
+          by: "Compliance Officer",
+          comment: `Overridden to ${verdict}. Reason: ${comment}`,
+          timestamp: new Date()
+        });
+        
+        await circular.save();
+      }
+    }
+
+    res.json({ message: "Submission verdict overridden successfully", submission });
+  } catch (err) {
+    console.error("❌ overrideSubmissionVerdict error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 }
