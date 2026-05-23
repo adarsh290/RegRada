@@ -5,8 +5,9 @@ These models define the schema that LangChain's `.with_structured_output()`
 will use to coerce the LLM response into validated, typed Python objects.
 """
 
-from pydantic import BaseModel, Field
-from typing import List, Literal
+from pydantic import BaseModel, Field, model_validator
+from typing import List, Literal, Optional
+from enum import Enum
 
 
 class MeasurableActionPoint(BaseModel):
@@ -24,6 +25,39 @@ class MeasurableActionPoint(BaseModel):
     priority: Literal["high", "medium", "low"] = Field(
         description="Priority level: 'high', 'medium', or 'low'."
     )
+    action_confidence: float = Field(
+        default=1.0,
+        description="Confidence score (0.0-1.0) on how explicitly the action is stated. 1.0 = verbatim, 0.0 = inferred/vague.",
+        ge=0.0,
+        le=1.0,
+    )
+    dept_confidence: float = Field(
+        default=1.0,
+        description="Confidence score (0.0-1.0) on how clearly a specific department is named.",
+        ge=0.0,
+        le=1.0,
+    )
+    deadline_confidence: float = Field(
+        default=1.0,
+        description="Confidence score (0.0-1.0) on how precisely the deadline is stated. 1.0 = explicit date, 0.1 = 'as soon as possible'.",
+        ge=0.0,
+        le=1.0,
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="Overall confidence, computed as min(action_confidence, dept_confidence, deadline_confidence).",
+        ge=0.0,
+        le=1.0,
+    )
+    confidence_flags: List[str] = Field(
+        default_factory=list,
+        description="List of free-text reasons for low confidence scores, if any."
+    )
+
+    @model_validator(mode='after')
+    def compute_confidence(self) -> "MeasurableActionPoint":
+        self.confidence = min(self.action_confidence, self.dept_confidence, self.deadline_confidence)
+        return self
 
 
 class CircularExtraction(BaseModel):
@@ -42,6 +76,10 @@ class CircularExtraction(BaseModel):
     scraped_url: str = Field(
         default="",
         description="The URL of the circular if it was autonomously scraped."
+    )
+    raw_text: str = Field(
+        default="",
+        description="The raw text extracted from the PDF if available."
     )
 
 
@@ -123,3 +161,54 @@ class ValidationRequest(BaseModel):
     proof_text: str = Field(
         description="Text extracted from the uploaded proof document."
     )
+
+
+# ── Delta Detection Models ──────────────────────────────────
+
+class DeadlineChange(BaseModel):
+    map_id: str = Field(description="The map_id of the original obligation.")
+    old_deadline: str
+    new_deadline: str
+
+class ClauseModification(BaseModel):
+    map_id: str = Field(description="The map_id of the original obligation.")
+    summary: str = Field(description="One sentence summarizing what changed.")
+
+class DeltaReport(BaseModel):
+    deadline_changes: List[DeadlineChange] = Field(default_factory=list)
+    clause_modifications: List[ClauseModification] = Field(default_factory=list)
+    obligations_added: List[str] = Field(default_factory=list, description="Titles of new obligations.")
+    obligations_removed: List[str] = Field(default_factory=list, description="Titles of removed obligations.")
+    generated_at: str = Field(default="", description="ISO timestamp of when the report was generated.")
+
+
+# ── Conflict Detection Models ───────────────────────────────
+
+class ConflictType(str, Enum):
+    DEADLINE_CONFLICT = "deadline_conflict"
+    CONTRADICTORY_REQUIREMENT = "contradictory_requirement"
+    JURISDICTION_OVERLAP = "jurisdiction_overlap"
+
+class ConflictReport(BaseModel):
+    map_id_a: str
+    circular_id_a: str
+    map_id_b: str
+    circular_id_b: str
+    conflict_type: ConflictType
+    explanation: str = Field(description="One sentence explaining the conflict to the CO.")
+    severity: Literal["high", "medium", "low"]
+
+
+# ── Natural Language Query Models ───────────────────────────
+
+class QueryResult(BaseModel):
+    map_id: str
+    circular_id: str
+    circular_title: str
+    circular_source: str
+    action_title: str
+    department: str
+    deadline: str
+    priority: str
+    relevance_score: float = Field(description="0.0-1.0 LLM-assigned score.")
+    relevance_reason: str = Field(description="One sentence why this MAP matches the query.")

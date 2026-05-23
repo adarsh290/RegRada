@@ -1,0 +1,7 @@
+# ai_service/.gitignore — BUG-SEC-006
+.env
+*.pyc
+__pycache__/
+chroma_db/
+*.log
+.DS_Store

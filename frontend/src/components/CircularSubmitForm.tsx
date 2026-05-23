@@ -1,10 +1,11 @@
-import { useState, useRef, useCallback, type DragEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, type DragEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ingestCircular, ingestCircularPDF } from '../services/api';
 import {
   UploadCloud, FileText, Zap, CheckCircle2, AlertCircle,
   ChevronRight, Loader2, X, Download, Building2, Clock, ShieldCheck, Sparkles
 } from 'lucide-react';
+import axios from 'axios';
 
 // ── Pipeline Stage Model ─────────────────────────────────────
 type StageStatus = 'idle' | 'running' | 'done' | 'error';
@@ -45,10 +46,12 @@ const GLOW_MAP: Record<string, string> = {
 
 // ── Result MAP card ──────────────────────────────────────────
 interface MAPResult {
+  map_id: string;
   action_title: string;
   department: string;
   deadline: string;
   priority: 'high' | 'medium' | 'low';
+  status: 'pending_review' | 'pending' | 'in_progress' | 'submitted' | 'verified' | 'rejected' | 'escalated';
 }
 
 const PRIORITY_STYLE: Record<string, string> = {
@@ -77,18 +80,18 @@ export default function CircularSubmitForm() {
   const [results, setResults] = useState<{ summary: string; maps: MAPResult[] } | null>(null);
 
   // ── File handling ────────────────────────────────────────
-  const validateFile = (f: File) => {
+  const validateFile = useCallback((f: File) => {
     if (!f.name.toLowerCase().endsWith('.pdf')) { setError('Only PDF files are accepted.'); return false; }
     if (f.size > 20 * 1024 * 1024) { setError('File must be under 20 MB.'); return false; }
     return true;
-  };
+  }, []);
 
   const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
     const dropped = e.dataTransfer.files[0];
     if (dropped && validateFile(dropped)) { setFile(dropped); setError(''); }
-  }, []);
+  }, [validateFile]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
@@ -96,11 +99,23 @@ export default function CircularSubmitForm() {
   };
 
   // ── Animated pipeline runner ─────────────────────────────
+  const isMountedRef = useRef(true);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const runStageAnimation = async () => {
+    cancelledRef.current = false;
     const delays = [200, 600, 3000, 500, 400, 400]; // approx time per stage
     const stageIds = ['ingest', 'extract', 'llm', 'structure', 'deadline', 'complete'];
 
     for (let i = 0; i < stageIds.length; i++) {
+      if (!isMountedRef.current || cancelledRef.current) return;
       const id = stageIds[i];
       const prevId = i > 0 ? stageIds[i - 1] : null;
 
@@ -111,6 +126,7 @@ export default function CircularSubmitForm() {
       }));
       await new Promise(r => setTimeout(r, delays[i]));
     }
+    if (!isMountedRef.current || cancelledRef.current) return;
     // Mark the last stage done
     setStages(s => s.map(st => ({ ...st, status: 'done' })));
   };
@@ -142,12 +158,18 @@ export default function CircularSubmitForm() {
 
       await animPromise; // ensure animation always completes visually
 
+      if (!isMountedRef.current) return;
       // Backend returns { message, circular } — extract nested fields
       const circularData = apiResult.circular || apiResult;
       setResults({ summary: circularData.summary || '', maps: circularData.maps || [] });
       setPhases('done');
-    } catch (err: any) {
-      setError(err.response?.data?.error || err.message || 'Processing failed.');
+    } catch (err) {
+      cancelledRef.current = true;
+      if (axios.isAxiosError(err)) {
+        setError(err.response?.data?.error || err.message || 'Processing failed.');
+      } else {
+        setError((err as Error).message || 'Processing failed.');
+      }
       setStages(s => s.map(st => st.status === 'running' ? { ...st, status: 'error' } : st));
       setPhases('input');
     }
@@ -192,11 +214,32 @@ export default function CircularSubmitForm() {
 }
 
 // ── INPUT VIEW ───────────────────────────────────────────────
+interface InputViewProps {
+  activeTab: 'pdf' | 'text';
+  setActiveTab: (tab: 'pdf' | 'text') => void;
+  file: File | null;
+  setFile: (file: File | null) => void;
+  isDragging: boolean;
+  setIsDragging: (isDragging: boolean) => void;
+  rawText: string;
+  setRawText: (text: string) => void;
+  title: string;
+  setTitle: (title: string) => void;
+  source: string;
+  setSource: (source: string) => void;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  handleDrop: (e: React.DragEvent<HTMLDivElement>) => void;
+  handleFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  error: string;
+  setError: (error: string) => void;
+  onSubmit: () => void;
+}
+
 function InputView({
   activeTab, setActiveTab, file, setFile, isDragging, setIsDragging,
   rawText, setRawText, title, setTitle, source, setSource,
   fileInputRef, handleDrop, handleFileSelect, error, setError, onSubmit
-}: any) {
+}: InputViewProps) {
   return (
     <div className="max-w-3xl mx-auto px-8 py-10 space-y-6">
       {/* Hero Header */}
@@ -212,12 +255,14 @@ function InputView({
       {/* Tab Row */}
       <div className="flex space-x-1 bg-gray-900 border border-gray-800 rounded-xl p-1">
         <button
+          type="button"
           onClick={() => setActiveTab('pdf')}
           className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'pdf' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
         >
           <UploadCloud size={15} /><span>Upload PDF</span>
         </button>
         <button
+          type="button"
           onClick={() => setActiveTab('text')}
           className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'text' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'text-gray-400 hover:text-white hover:bg-gray-800'}`}
         >
@@ -228,13 +273,13 @@ function InputView({
       {/* Meta Fields */}
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-1.5">
-          <label className="text-sm font-medium text-gray-300">Title</label>
-          <input type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Guidelines on Digital Lending"
+          <label htmlFor="circular-title" className="text-sm font-medium text-gray-300">Title</label>
+          <input id="circular-title" type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Guidelines on Digital Lending"
             className="w-full bg-gray-900 border border-gray-800 rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm" />
         </div>
         <div className="space-y-1.5">
-          <label className="text-sm font-medium text-gray-300">Source Ref <span className="text-gray-600">(optional)</span></label>
-          <input type="text" value={source} onChange={e => setSource(e.target.value)} placeholder="e.g. RBI/2026-27/01"
+          <label htmlFor="circular-source" className="text-sm font-medium text-gray-300">Source Ref <span className="text-gray-600">(optional)</span></label>
+          <input id="circular-source" type="text" value={source} onChange={e => setSource(e.target.value)} placeholder="e.g. RBI/2026-27/01"
             className="w-full bg-gray-900 border border-gray-800 rounded-lg px-4 py-2.5 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm" />
         </div>
       </div>
@@ -294,12 +339,13 @@ function InputView({
       {error && (
         <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-sm flex items-center justify-between">
           <div className="flex items-center space-x-2"><AlertCircle size={16} /><span>{error}</span></div>
-          <button onClick={() => setError('')}><X size={16} /></button>
+          <button type="button" onClick={() => setError('')} aria-label="Dismiss error"><X size={16} /></button>
         </div>
       )}
 
       {/* Run Button */}
       <button
+        type="button"
         onClick={onSubmit}
         className="w-full relative group overflow-hidden bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-xl px-4 py-4 flex items-center justify-center space-x-3 transition-all shadow-xl shadow-blue-500/20 hover:shadow-blue-500/40 text-base"
       >
@@ -313,12 +359,11 @@ function InputView({
 
 // ── RUNNING VIEW ─────────────────────────────────────────────
 function RunningView({ stages, fileName }: { stages: PipelineStage[]; fileName: string }) {
-  const activeIdx = stages.findIndex(s => s.status === 'running');
   const doneCount = stages.filter(s => s.status === 'done').length;
   const progress = Math.round((doneCount / stages.length) * 100);
 
   return (
-    <div className="h-full flex flex-col items-center justify-center px-8 py-16 space-y-10">
+    <div className="min-h-full flex flex-col items-center justify-center px-8 py-16 space-y-10">
       {/* Pulsing orb */}
       <div className="relative flex items-center justify-center">
         <div className="absolute w-40 h-40 rounded-full bg-blue-500/10 animate-ping" />
@@ -349,7 +394,7 @@ function RunningView({ stages, fileName }: { stages: PipelineStage[]; fileName: 
 
       {/* Stage Grid */}
       <div className="w-full max-w-2xl space-y-3">
-        {stages.map((stage, i) => {
+        {stages.map((stage) => {
           const Icon = stage.icon;
           const isActive = stage.status === 'running';
           const isDone = stage.status === 'done';
@@ -403,10 +448,10 @@ function DoneView({ results, onReset, onView }: { results: { summary: string; ma
           </p>
         </div>
         <div className="flex space-x-3">
-          <button onClick={onReset} className="px-4 py-2 text-sm text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 rounded-lg transition-colors flex items-center space-x-2">
+          <button type="button" onClick={onReset} className="px-4 py-2 text-sm text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 rounded-lg transition-colors flex items-center space-x-2">
             <X size={14} /><span>New</span>
           </button>
-          <button onClick={onView} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors flex items-center space-x-2 font-medium">
+          <button type="button" onClick={onView} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors flex items-center space-x-2 font-medium">
             <Download size={14} /><span>View in Inbox</span>
           </button>
         </div>
@@ -427,8 +472,9 @@ function DoneView({ results, onReset, onView }: { results: { summary: string; ma
           <span className="text-xs text-gray-600">{results.maps.length} total</span>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {results.maps.map((map, i) => (
-            <div key={i} className="p-4 bg-gray-900 border border-gray-800 rounded-xl hover:border-gray-700 transition-colors space-y-3">
+          {results.maps.map((map) => (
+            // BUG-FE2-009: Use stable map_id key instead of array index
+            <div key={map.map_id} className="p-4 bg-gray-900 border border-gray-800 rounded-xl hover:border-gray-700 transition-colors space-y-3">
               <div className="flex items-start justify-between space-x-2">
                 <p className="text-sm font-semibold text-white leading-snug">{map.action_title}</p>
                 <span className={`text-xs font-bold px-2 py-0.5 rounded-full border flex-shrink-0 ${PRIORITY_STYLE[map.priority] || PRIORITY_STYLE.medium}`}>

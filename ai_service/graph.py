@@ -33,7 +33,12 @@ class GraphState(TypedDict):
 
 
 # ── System Prompt ───────────────────────────────────────────
-SYSTEM_PROMPT = "You are a senior banking compliance officer. Your job is to read regulatory circulars and extract Measurable Action Points (MAPs). For each action required by the bank, output the exact action, the department responsible (e.g., IT, Retail Banking, Legal, Compliance), a strict deadline, and the priority (High, Medium, Low). Ignore filler text. ONLY extract explicit mandates."
+SYSTEM_PROMPT = """You are a senior banking compliance officer. Your job is to read regulatory circulars and extract Measurable Action Points (MAPs). For each action required by the bank, output the exact action, the department responsible (e.g., IT, Retail Banking, Legal, Compliance), a strict deadline, and the priority (High, Medium, Low). Ignore filler text. ONLY extract explicit mandates.
+Additionally, you must self-score your extraction confidence:
+- action_confidence: how explicitly the action is stated (1.0 = verbatim, 0.0 = inferred/vague)
+- dept_confidence: how clearly a specific department is named (1.0 = clearly named, 0.0 = vague)
+- deadline_confidence: how precisely the deadline is stated (1.0 = explicit date, 0.1 = 'as soon as possible')
+If any score is low, add a brief reason to confidence_flags (e.g. 'deadline ambiguous')."""
 
 
 # ── Fallback Data ───────────────────────────────────────────
@@ -75,11 +80,17 @@ FALLBACK_EXTRACTION = CircularExtraction(
 
 
 # ── LLM Node ───────────────────────────────────────────────
+_llm_cache = {}
+
 def _build_llm(provider: str):
     """
     Build the LangChain LLM based on the provider string.
+    Caches the instance to avoid re-initialization per request.
     Returns (llm_instance, mode_label) or (None, "fallback").
     """
+    if provider in _llm_cache:
+        return _llm_cache[provider]
+
     if provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -91,8 +102,10 @@ def _build_llm(provider: str):
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 temperature=0,
                 api_key=api_key,
+                timeout=60,
             )
-            return llm, "llm_openai"
+            _llm_cache[provider] = (llm, "llm_openai")
+            return _llm_cache[provider]
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI LLM: {e}")
             return None, "fallback"
@@ -101,12 +114,14 @@ def _build_llm(provider: str):
         try:
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(
-                model=os.getenv("LOCAL_MODEL", "llama3.1"),
+                model=os.getenv("OLLAMA_MODEL", os.getenv("LOCAL_MODEL", "llama3.1")),
                 temperature=0,
-                base_url="http://localhost:11434/v1",
-                api_key="ollama",  # Ollama doesn't require a real key
+                base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+                api_key="ollama",
+                timeout=60,
             )
-            return llm, "llm_local"
+            _llm_cache[provider] = (llm, "llm_local")
+            return _llm_cache[provider]
         except Exception as e:
             logger.error(f"Failed to initialize local LLM: {e}")
             return None, "fallback"
@@ -167,7 +182,7 @@ def extract_maps_node(state: GraphState) -> GraphState:
         logger.error(error_msg)
         errors.append(error_msg)
 
-        fallback = FALLBACK_EXTRACTION.model_copy()
+        fallback = FALLBACK_EXTRACTION.model_copy(deep=True)
         fallback.extraction_mode = "fallback"
 
         return {

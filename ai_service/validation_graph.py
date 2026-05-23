@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 
 from models import ValidationVerdict
+from graph import _build_llm  # BUG-AI-015: Use shared LLM factory for consistency
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -86,44 +87,7 @@ def _fallback_verdict(proof_text: str, map_action: str) -> ValidationVerdict:
         )
 
 
-# ── Node 1: Extract Text from File ──────────────────────────
-def extract_proof_text(state: ValidationState) -> ValidationState:
-    """
-    Extracts plain text from the uploaded proof file.
-    Supports PDF (via pdfplumber) and plain text files.
-    """
-    errors = list(state.get("errors", []))
-    filename = state.get("proof_filename", "")
-    proof_bytes = state.get("proof_bytes", b"")
-
-    extracted = ""
-
-    try:
-        if filename.lower().endswith(".pdf"):
-            import pdfplumber
-            with pdfplumber.open(io.BytesIO(proof_bytes)) as pdf:
-                pages = [page.extract_text() or "" for page in pdf.pages]
-                extracted = "\n".join(pages).strip()
-            logger.info(f"PDF extraction: {len(extracted)} chars from {len(pdf.pages)} pages")
-        else:
-            # Treat as plain text (TXT, DOC text fallback)
-            extracted = proof_bytes.decode("utf-8", errors="replace").strip()
-            logger.info(f"Text extraction: {len(extracted)} chars")
-
-        if not extracted:
-            extracted = "[Document appears to be empty or non-extractable]"
-            errors.append("Proof document yielded no extractable text.")
-
-    except Exception as e:
-        error_msg = f"Text extraction failed: {e}"
-        logger.error(error_msg)
-        errors.append(error_msg)
-        extracted = "[Extraction failed]"
-
-    return {**state, "proof_text": extracted, "errors": errors}
-
-
-# ── Node 2: Validate Compliance via LLM ─────────────────────
+# ── Node 1: Validate Compliance via LLM ─────────────────────
 def validate_compliance(state: ValidationState) -> ValidationState:
     """
     Sends the extracted proof text + original mandate to the LLM
@@ -136,38 +100,8 @@ def validate_compliance(state: ValidationState) -> ValidationState:
 
     provider = os.getenv("MODEL_PROVIDER", "fallback").lower()
 
-    # ── Build LLM ───────────────────────────────────────────
-    llm = None
-    mode = "fallback"
-
-    if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            try:
-                from langchain_openai import ChatOpenAI
-                llm = ChatOpenAI(
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                    temperature=0,
-                    api_key=api_key,
-                )
-                mode = "llm_openai"
-            except Exception as e:
-                errors.append(f"OpenAI init failed: {e}")
-        else:
-            errors.append("MODEL_PROVIDER=openai but OPENAI_API_KEY not set.")
-
-    elif provider == "local":
-        try:
-            from langchain_openai import ChatOpenAI
-            llm = ChatOpenAI(
-                model=os.getenv("LOCAL_MODEL", "llama3.1"),
-                temperature=0,
-                base_url="http://localhost:11434/v1",
-                api_key="ollama",
-            )
-            mode = "llm_local"
-        except Exception as e:
-            errors.append(f"Local LLM init failed: {e}")
+    # BUG-AI-015: Use shared _build_llm() so validation uses same LLM config as the rest of the system
+    llm, mode = _build_llm(provider)
 
     # ── Fallback path ────────────────────────────────────────
     if llm is None:
@@ -182,16 +116,16 @@ def validate_compliance(state: ValidationState) -> ValidationState:
         prompt = ChatPromptTemplate.from_messages([
             ("system", VALIDATION_SYSTEM_PROMPT),
             ("human",
-             "MANDATE (assigned to {department}):\n{mandate}\n\n"
-             "PROOF DOCUMENT (extracted text):\n{proof}\n\n"
-             "Evaluate whether the proof satisfies the mandate."),
+              "MANDATE (assigned to {department}):\n{mandate}\n\n"
+              "PROOF DOCUMENT (extracted text):\n{proof}\n\n"
+              "Evaluate whether the proof satisfies the mandate."),
         ])
 
         chain = prompt | llm.with_structured_output(ValidationVerdict)
         result: ValidationVerdict = chain.invoke({
             "department": map_dept,
             "mandate": map_action,
-            "proof": proof_text[:6000],  # cap tokens
+            "proof": proof_text[:15000],  # BUG-AI-022: Increase cap to 15k tokens/chars
         })
 
         logger.info(f"Validation complete ({mode}): {result.verdict} (confidence={result.confidence})")
@@ -211,14 +145,12 @@ def validate_compliance(state: ValidationState) -> ValidationState:
 def build_validation_graph():
     """Compile the validation LangGraph state machine."""
     builder = StateGraph(ValidationState)
-    builder.add_node("extract_proof_text", extract_proof_text)
     builder.add_node("validate_compliance", validate_compliance)
-    builder.add_edge(START, "extract_proof_text")
-    builder.add_edge("extract_proof_text", "validate_compliance")
+    builder.add_edge(START, "validate_compliance")
     builder.add_edge("validate_compliance", END)
     return builder.compile()
 
 
 # Module-level compiled graph — import from main.py
 validation_graph = build_validation_graph()
-logger.info("LangGraph validation pipeline compiled: START → extract_proof_text → validate_compliance → END")
+logger.info("LangGraph validation pipeline compiled: START → validate_compliance → END")

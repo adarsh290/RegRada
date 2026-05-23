@@ -1,6 +1,7 @@
-import { useState, useRef, type DragEvent } from 'react';
+import { useState, useRef, useEffect, type DragEvent } from 'react';
 import { X, UploadCloud, FileText, Loader2, CheckCircle2, Plus, Trash2 } from 'lucide-react';
 import { submitProof } from '../services/api';
+import axios from 'axios';
 
 interface ProofUploadModalProps {
   circularId: string;
@@ -28,11 +29,20 @@ export default function ProofUploadModal({
   const [isDone, setIsDone] = useState(false);
   const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   const validateFile = (f: File): string | null => {
-    const ext = '.' + f.name.split('.').pop()?.toLowerCase();
-    if (!ALLOWED.includes(ext)) return 'Only PDF, TXT, DOC, DOCX files are allowed.';
-    if (f.size > MAX_SIZE) return `${f.name} exceeds the 20 MB limit.`;
+    const parts = f.name.split('.');
+    if (parts.length < 2) return 'Invalid file type. Allowed: PDF, TXT, DOC, DOCX.';
+    const ext = '.' + parts.pop()?.toLowerCase();
+    if (!ALLOWED.includes(ext)) return 'Invalid file type. Allowed: PDF, TXT, DOC, DOCX.';
+    if (f.size > MAX_SIZE) return 'File too large (max 20MB).';
     return null;
   };
 
@@ -46,7 +56,7 @@ export default function ProofUploadModal({
       }
       const err = validateFile(f);
       if (err) { setError(err); continue; }
-      if (!files.find(ex => ex.name === f.name)) toAdd.push(f);
+      if (!files.find(ex => ex.name === f.name) && !toAdd.find(t => t.name === f.name)) toAdd.push(f);
     }
     if (toAdd.length) setFiles(prev => [...prev, ...toAdd]);
   };
@@ -79,9 +89,13 @@ export default function ProofUploadModal({
       formData.append('notes', notes);
       await submitProof(formData);
       setIsDone(true);
-      setTimeout(() => { onSuccess(); onClose(); }, 1500);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Submission failed. Please try again.');
+      timerRef.current = setTimeout(() => { onSuccess(); onClose(); }, 1500);
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        setError(err.response?.data?.error || 'Submission failed. Please try again.');
+      } else {
+        setError('Submission failed. Please try again.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -96,7 +110,7 @@ export default function ProofUploadModal({
             <h3 className="text-lg font-bold text-white">Upload Proof of Compliance</h3>
             <p className="text-gray-400 text-sm mt-1 line-clamp-2">{mapAction}</p>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors ml-4 mt-0.5">
+          <button onClick={onClose} aria-label="Close modal" className="text-gray-500 hover:text-white transition-colors ml-4 mt-0.5">
             <X size={20} />
           </button>
         </div>
@@ -144,8 +158,8 @@ export default function ProofUploadModal({
           {files.length > 0 && (
             <div className="space-y-2">
               <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Selected Files ({files.length})</p>
-              {files.map(f => (
-                <div key={f.name} className="flex items-center justify-between bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
+              {files.map((f, idx) => (
+                <div key={`${f.name}-${idx}`} className="flex items-center justify-between bg-gray-950 border border-gray-800 rounded-lg px-3 py-2">
                   <div className="flex items-center space-x-2 min-w-0">
                     <FileText size={14} className="text-blue-400 shrink-0" />
                     <span className="text-sm text-white truncate">{f.name}</span>
@@ -166,8 +180,10 @@ export default function ProofUploadModal({
 
           {/* Notes */}
           <div className="space-y-2">
-            <label className="text-sm font-medium text-gray-300">Notes (optional)</label>
+            {/* BUG-FE2-030: Add htmlFor and id to link label and textarea */}
+            <label htmlFor="proof-notes" className="text-sm font-medium text-gray-300">Notes (optional)</label>
             <textarea
+              id="proof-notes"
               value={notes}
               onChange={e => setNotes(e.target.value)}
               placeholder="e.g. Updated the policy document as per circular requirements..."

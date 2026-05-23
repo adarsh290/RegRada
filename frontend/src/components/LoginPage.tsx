@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useAuth } from "../context/authContext";
 import { Shield, Lock, User, AlertCircle } from "lucide-react";
+import axios from "axios";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -15,8 +16,12 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await login(username, password);
-    } catch (err: any) {
-      setError(err.response?.data?.error || "Login failed. Please try again.");
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        setError(err.response?.data?.error || "Login failed. Please try again.");
+      } else {
+        setError("Login failed. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
@@ -47,7 +52,7 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div className="space-y-2">
-              <label className="text-sm font-medium text-gray-300">Username</label>
+              <label htmlFor="login-username" className="text-sm font-medium text-gray-300">Username</label>
               <div className="relative">
                 <User size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
                 <input
@@ -63,7 +68,7 @@ export default function LoginPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium text-gray-300">Password</label>
+              <label htmlFor="login-password" className="text-sm font-medium text-gray-300">Password</label>
               <div className="relative">
                 <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
                 <input
@@ -99,15 +104,6 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Default credentials hint */}
-          <div className="mt-6 p-4 bg-gray-950 border border-gray-800 rounded-xl">
-            <p className="text-xs text-gray-500 font-bold uppercase tracking-wider mb-2">Default Credentials</p>
-            <div className="space-y-1 text-xs text-gray-400 font-mono">
-              <p><span className="text-gray-300">CO:</span> compliance.officer / CO@RegRadar2026</p>
-              <p><span className="text-gray-300">IT:</span> it.dept / IT@RegRadar2026</p>
-              <p><span className="text-gray-300">Legal:</span> legal.dept / Legal@RegRadar2026</p>
-            </div>
-          </div>
         </div>
       </div>
     </div>

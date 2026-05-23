@@ -30,10 +30,24 @@ const UserSchema = new Schema<IUser>(
     },
     department_name: {
       type: String,
-      default: null,
+      validate: {
+        validator: function (this: any, value: string) {
+          if (this.role === "DEPARTMENT" && (!value || value.trim() === "")) return false;
+          return true;
+        },
+        message: "department_name is required for DEPARTMENT role",
+      },
     },
     email: {
       type: String,
+      unique: true,
+      sparse: true,
+      validate: {
+        validator: function (v: string) {
+          return v ? require("validator").isEmail(v) : true;
+        },
+        message: "Invalid email format",
+      },
       default: null,
     },
   },

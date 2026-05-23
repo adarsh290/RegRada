@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react';
-import { getCirculars } from '../services/api';
-import { ChevronDown, ChevronUp, FileText, Calendar, Building2, AlertCircle } from 'lucide-react';
+import { getCirculars, approveMAP } from '../services/api';
+import DeltaReportModal from './DeltaReportModal';
+import { ChevronDown, ChevronUp, FileText, Calendar, Building2, AlertCircle, Link, Flame } from 'lucide-react';
+import axios from 'axios';
+import { useAuth } from '../context/authContext';
 
 interface MAP {
   map_id: string;
@@ -10,6 +13,8 @@ interface MAP {
   priority: 'high' | 'medium' | 'low';
   status: string;
   assigned_to: string;
+  confidence?: number;
+  needs_co_review?: boolean;
 }
 
 interface Circular {
@@ -20,30 +25,70 @@ interface Circular {
   extraction_mode: string;
   date_published: string;
   maps: MAP[];
+  amends?: string;
+  delta_report?: any;
+  has_conflicts?: boolean;
 }
 
 export default function ComplianceInbox() {
+  const { user } = useAuth();
   const [circulars, setCirculars] = useState<Circular[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [deltaReportData, setDeltaReportData] = useState<{ report: any, source: string } | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [approveError, setApproveError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchCirculars();
+    const abortController = new AbortController();
+    fetchCirculars(abortController.signal);
+    return () => {
+      abortController.abort();
+    };
   }, []);
 
-  const fetchCirculars = async () => {
+  const fetchCirculars = async (signal?: AbortSignal) => {
     try {
-      const data = await getCirculars();
-      setCirculars(data);
-    } catch (error) {
+      setError(null);
+      const data = await getCirculars({ signal });
+      if (!signal?.aborted) {
+        setCirculars(data);
+      }
+    } catch (error: any) {
+      if (axios.isCancel(error) || error.name === 'CanceledError') {
+        return;
+      }
       console.error("Failed to fetch circulars:", error);
+      setError("Failed to fetch circulars from server.");
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
     }
   };
 
   const toggleExpand = (id: string) => {
     setExpandedId(expandedId === id ? null : id);
+  };
+
+  const handleApproveMap = async (circularId: string, mapId: string) => {
+    setApprovingId(mapId);
+    setApproveError(null);
+    // BUG-FE2-004: Use AbortController for post-approve refresh to avoid unmounted state updates
+    const controller = new AbortController();
+    try {
+      await approveMAP(circularId, mapId);
+      await fetchCirculars(controller.signal);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        console.error('Failed to approve MAP:', err);
+        // BUG-FE2-015: Replace blocking alert() with in-component error state
+        setApproveError('Failed to approve MAP. Please try again.');
+      }
+    } finally {
+      setApprovingId(null);
+    }
   };
 
   const getPriorityColor = (priority: string) => {
@@ -61,6 +106,9 @@ export default function ComplianceInbox() {
       case 'rejected': return 'bg-red-500/10 text-red-400 border-red-500/20';
       case 'submitted': return 'bg-amber-500/10 text-amber-400 border-amber-500/20';
       case 'in_progress': return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+      case 'pending_review': return 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+      // BUG-CONTRACT-015: Handle 'escalated' in ComplianceInbox.getStatusColor()
+      case 'escalated': return 'bg-purple-500/10 text-purple-400 border-purple-500/20';
       default: return 'bg-gray-800 text-gray-400 border-gray-700';
     }
   };
@@ -72,6 +120,27 @@ export default function ComplianceInbox() {
           <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mb-4" />
           <p className="text-gray-400 font-medium">Loading Inbox...</p>
         </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 max-w-lg mx-auto text-center space-y-4">
+        <div className="p-3 bg-red-500/10 rounded-full border border-red-500/20 text-red-400">
+          <AlertCircle size={32} />
+        </div>
+        <h2 className="text-xl font-bold text-white">Failed to Load Inbox</h2>
+        <p className="text-gray-400 text-sm">{error}</p>
+        <button
+          onClick={() => {
+            setLoading(true);
+            fetchCirculars();
+          }}
+          className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-2.5 rounded-lg transition-colors shadow-lg"
+        >
+          Try Again
+        </button>
       </div>
     );
   }
@@ -89,6 +158,14 @@ export default function ComplianceInbox() {
         </div>
       </div>
 
+      {/* BUG-FE2-015: Inline approval error instead of blocking alert() */}
+      {approveError && (
+        <div className="mb-4 flex items-center justify-between bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">
+          <span className="text-sm text-red-400">{approveError}</span>
+          <button type="button" onClick={() => setApproveError(null)} className="ml-3 text-red-400 hover:text-red-300">✕</button>
+        </div>
+      )}
+
       {circulars.length === 0 ? (
         <div className="text-center py-20 bg-gray-900/50 rounded-2xl border border-gray-800 border-dashed">
           <FileText size={48} className="mx-auto text-gray-700 mb-4" />
@@ -101,6 +178,9 @@ export default function ComplianceInbox() {
             <div key={circular._id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden transition-all">
               {/* Card Header (Clickable) */}
               <div 
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleExpand(circular._id); }}
                 className="p-6 cursor-pointer hover:bg-gray-800/50 transition-colors flex items-start justify-between"
                 onClick={() => toggleExpand(circular._id)}
               >
@@ -111,11 +191,29 @@ export default function ComplianceInbox() {
                     </span>
                     <span className="px-2.5 py-1 bg-blue-500/10 text-blue-400 text-xs font-semibold rounded border border-blue-500/20 flex items-center">
                       <BotIcon />
-                      {circular.extraction_mode.replace('llm_', '').toUpperCase()}
+                      {(circular.extraction_mode || '').replace('llm_', '').toUpperCase()}
                     </span>
+                    {circular.amends && circular.delta_report && (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); setDeltaReportData({ report: circular.delta_report, source: circular.amends! }); }}
+                        className="px-2.5 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 text-xs font-semibold rounded border border-indigo-500/20 flex items-center transition-colors"
+                      >
+                        <Link size={12} className="mr-1" />
+                        Amends: {circular.amends}
+                      </button>
+                    )}
+                    {circular.has_conflicts && (
+                      <span className="px-2.5 py-1 bg-red-500/10 text-red-400 text-xs font-semibold rounded border border-red-500/20 flex items-center">
+                        <Flame size={12} className="mr-1" />
+                        Conflict
+                      </span>
+                    )}
                     <span className="text-gray-500 text-xs flex items-center">
                       <Calendar size={12} className="mr-1" />
-                      {new Date(circular.date_published).toLocaleDateString()}
+                      {/* BUG-FE2-026: Validate date before rendering to avoid 'Invalid Date' */}
+                      {circular.date_published && !isNaN(new Date(circular.date_published).getTime()) 
+                        ? new Date(circular.date_published).toLocaleDateString() 
+                        : 'Unknown'}
                     </span>
                   </div>
                   <h3 className="text-lg font-bold text-white mb-2">{circular.title}</h3>
@@ -170,10 +268,19 @@ export default function ComplianceInbox() {
                                 {map.priority}
                               </span>
                             </td>
-                            <td className="py-4">
+                            <td className="py-4 pr-4">
                               <span className={`px-2 py-1 text-[10px] uppercase font-bold rounded border ${getStatusColor(map.status)}`}>
-                                {map.status.replace('_', ' ')}
+                                {map.status.replace(/_/g, ' ')}
                               </span>
+                              {map.status === 'pending_review' && user?.role === 'CO' && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleApproveMap(circular._id, map.map_id); }}
+                                  disabled={approvingId === map.map_id}
+                                  className="ml-2 px-2 py-1 bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border border-orange-500/30 rounded text-[10px] font-bold uppercase transition-colors disabled:opacity-50"
+                                >
+                                  {approvingId === map.map_id ? 'Approving...' : 'Approve'}
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -185,6 +292,14 @@ export default function ComplianceInbox() {
             </div>
           ))}
         </div>
+      )}
+
+      {deltaReportData && (
+        <DeltaReportModal 
+          report={deltaReportData.report} 
+          source={deltaReportData.source} 
+          onClose={() => setDeltaReportData(null)} 
+        />
       )}
     </div>
   );

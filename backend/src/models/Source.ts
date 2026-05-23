@@ -6,14 +6,17 @@ export interface ISource extends Document {
   last_scraped?: Date;
   status: 'active' | 'error';
   created_at: Date;
+  updated_at: Date;
 }
 
-const SourceSchema: Schema = new Schema({
+// BUG-BE2-034: Added generic type parameter to Schema
+const SourceSchema = new Schema<ISource>({
   name: { type: String, required: true },
-  url: { type: String, required: true },
+  url: { type: String, required: true, unique: true },
   last_scraped: { type: Date },
   status: { type: String, enum: ['active', 'error'], default: 'active' },
-  created_at: { type: Date, default: Date.now },
+}, {
+  timestamps: { createdAt: "created_at", updatedAt: "updated_at" }
 });
 
 export default mongoose.model<ISource>('Source', SourceSchema);

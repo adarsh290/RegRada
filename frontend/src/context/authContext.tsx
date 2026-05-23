@@ -1,7 +1,5 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
-import axios from "axios";
-
-const API = "http://localhost:5000/api";
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
+import api from "../services/api";
 
 interface AuthUser {
   id: string;
@@ -12,9 +10,8 @@ interface AuthUser {
 
 interface AuthContextType {
   user: AuthUser | null;
-  token: string | null;
   login: (username: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   isLoading: boolean;
 }
 
@@ -22,41 +19,47 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Restore session from localStorage on mount
+  // Restore session via /auth/me on mount (no sessionStorage caching)
   useEffect(() => {
-    const stored = localStorage.getItem("regradar_token");
-    const storedUser = localStorage.getItem("regradar_user");
-    if (stored && storedUser) {
-      setToken(stored);
-      setUser(JSON.parse(storedUser));
-      axios.defaults.headers.common["Authorization"] = `Bearer ${stored}`;
-    }
-    setIsLoading(false);
+    const controller = new AbortController();
+    const fetchUser = async () => {
+      try {
+        const res = await api.get("/auth/me", { signal: controller.signal });
+        setUser(res.data);
+      } catch (err: any) {
+        if (err.name !== 'CanceledError') {
+          setUser(null);
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchUser();
+    return () => controller.abort();
   }, []);
 
-  const login = async (username: string, password: string) => {
-    const res = await axios.post(`${API}/auth/login`, { username, password });
-    const { token: newToken, user: newUser } = res.data;
-    setToken(newToken);
+  const login = useCallback(async (username: string, password: string) => {
+    const res = await api.post(`/auth/login`, { username, password });
+    const { user: newUser } = res.data;
     setUser(newUser);
-    axios.defaults.headers.common["Authorization"] = `Bearer ${newToken}`;
-    localStorage.setItem("regradar_token", newToken);
-    localStorage.setItem("regradar_user", JSON.stringify(newUser));
-  };
+  }, []);
 
-  const logout = () => {
-    setToken(null);
+  const logout = useCallback(async () => {
+    try {
+      await api.post(`/auth/logout`, {});
+    } catch (err) {
+      // BUG-SEC-036: Remove console.log of full error on logout
+      console.error("Failed to call logout endpoint on backend");
+    }
     setUser(null);
-    delete axios.defaults.headers.common["Authorization"];
-    localStorage.removeItem("regradar_token");
-    localStorage.removeItem("regradar_user");
-  };
+  }, []);
+
+  const value = useMemo(() => ({ user, login, logout, isLoading }), [user, login, logout, isLoading]);
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, isLoading }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

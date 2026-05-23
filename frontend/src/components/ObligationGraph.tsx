@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react';
-import ReactFlow, {
-  Background, Controls, MarkerType,
+import { useEffect, useState, useCallback, useRef } from 'react';
+import {
+  ReactFlow, Background, Controls, MarkerType,
   useNodesState, useEdgesState,
   type Node, type Edge,
 } from '@xyflow/react';
@@ -11,6 +11,7 @@ import {
   GitBranch, AlertTriangle, CheckCircle2, Clock,
   Building2, Loader2, ChevronDown, Info
 } from 'lucide-react';
+import axios from 'axios';
 
 // ── Dagre auto-layout helper ─────────────────────────────────
 const NODE_W = 240;
@@ -57,8 +58,19 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   rejected:    <AlertTriangle size={12} className="text-red-400" />,
 };
 
+// BUG-FE2-034: Type MAPNode data instead of using any
+interface MAPNodeData {
+  id: string;
+  department: string;
+  priority: string;
+  action_title: string;
+  deadline: string;
+  status: string;
+  blocked: boolean;
+}
+
 // ── Custom MAP Node ──────────────────────────────────────────
-function MAPNode({ data }: { data: any }) {
+function MAPNode({ data }: { data: MAPNodeData }) {
   const color = DEPT_COLORS[data.department] || fallbackColor;
   return (
     <div className={`relative w-60 rounded-2xl border overflow-hidden shadow-xl ${
@@ -94,7 +106,8 @@ function MAPNode({ data }: { data: any }) {
           </div>
           <div className="flex items-center space-x-1 text-gray-400">
             {STATUS_ICON[data.status]}
-            <span className="capitalize">{data.status?.replace('_', ' ')}</span>
+            {/* BUG-FE2-042: Use global regex to replace ALL underscores */}
+            <span className="capitalize">{data.status?.replace(/_/g, ' ')}</span>
           </div>
         </div>
       </div>
@@ -120,25 +133,38 @@ export default function ObligationGraph() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   // Load circular list
   useEffect(() => {
-    getCirculars().then((data: any[]) => {
+    const controller = new AbortController();
+    getCirculars({ signal: controller.signal }).then((data: any[]) => {
+      if (controller.signal.aborted) return;
       const parsed = data.filter(c => c.status === 'parsed' || c.maps?.length > 0);
       setCirculars(parsed);
       if (parsed.length > 0) setSelectedId(parsed[0]._id);
-    }).catch(() => setError('Failed to load circulars.'));
+    }).catch(() => {
+      if (!controller.signal.aborted) setError('Failed to load circulars.');
+    });
+    return () => controller.abort();
   }, []);
+
+  // BUG-FE2-012: Track in-flight loadGraph request so we can cancel on circular change
+  const graphAbortRef = useRef<AbortController | null>(null);
 
   // Load graph for selected circular
   const loadGraph = useCallback(async (id: string) => {
     if (!id) return;
+    // Cancel any in-flight request before starting a new one
+    if (graphAbortRef.current) graphAbortRef.current.abort();
+    const controller = new AbortController();
+    graphAbortRef.current = controller;
     setLoading(true);
     setError('');
     try {
-      const data = await getObligationGraph(id);
+      const data = await getObligationGraph(id, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setGraphData(data);
 
       // Build React Flow nodes
@@ -168,12 +194,17 @@ export default function ObligationGraph() {
       const laid = layoutGraph(rfNodes, rfEdges);
       setNodes(laid.nodes);
       setEdges(laid.edges);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to load obligation graph.');
+    } catch (err) {
+      if (axios.isAxiosError(err) && (err.name === 'CanceledError' || err.code === 'ERR_CANCELED')) return;
+      if (controller.signal.aborted) return;
+      setError('Failed to load dependency graph.');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   }, [setNodes, setEdges]);
+
 
   useEffect(() => {
     if (selectedId) loadGraph(selectedId);

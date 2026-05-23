@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import axios from 'axios';
+import mongoose from 'mongoose';
 import Source from '../models/Source';
 import Circular from '../models/Circular';
 
@@ -34,6 +35,18 @@ export const addSource = async (req: Request, res: Response) => {
        res.status(400).json({ error: "Name and URL are required" });
        return;
     }
+
+    try {
+      const parsedUrl = new URL(url);
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        res.status(400).json({ error: "Invalid URL protocol. Only http and https are allowed." });
+        return;
+      }
+    } catch {
+      res.status(400).json({ error: "Invalid URL format" });
+      return;
+    }
+
     const newSource = new Source({ name, url });
     await newSource.save();
     res.status(201).json(newSource);
@@ -46,6 +59,11 @@ export const addSource = async (req: Request, res: Response) => {
 export const scrapeSource = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      res.status(400).json({ error: "Invalid Source ID format" });
+      return;
+    }
+
     const source = await Source.findById(id);
     if (!source) {
       res.status(404).json({ error: "Source not found" });
@@ -56,7 +74,7 @@ export const scrapeSource = async (req: Request, res: Response) => {
 
     const aiResponse = await axios.post(`${AI_SERVICE_URL}/scrape-source`, {
       url: source.url
-    });
+    }, { timeout: 60000 });
 
     const extraction = aiResponse.data as AIExtractionResponse;
     
@@ -67,9 +85,10 @@ export const scrapeSource = async (req: Request, res: Response) => {
     console.log(`✅ Scrape complete for ${source.name} — Extracted ${extraction.maps?.length ?? 0} MAPs`);
 
     // Save to circular
+    const scrapePrefix = Math.floor(Math.random() * 90000) + 10000;
     const mappedMaps = (extraction.maps || []).map((map, index) => ({
       ...map,
-      map_id: `MAP-${(index + 1).toString().padStart(3, "0")}`,
+      map_id: `MAP-${scrapePrefix}-${(index + 1).toString().padStart(3, "0")}`,
       status: "pending" as const,
       assigned_to: map.department,
     }));
@@ -98,11 +117,12 @@ export const scrapeSource = async (req: Request, res: Response) => {
     // Update source status to error
     try {
         await Source.findByIdAndUpdate(req.params.id, { status: 'error' });
-    } catch (e) {}
-
-    res.status(500).json({ 
-      error: "Scraping failed", 
-      details: err.response?.data?.detail || err.message 
+    } catch (e) {
+        // BUG-BE2-017: Log database errors instead of swallowing them empty catch block
+        console.error("Failed to update source status to error:", e);
+    }
+    res.status(502).json({ 
+      error: "AI scraping service failed to process the request"
     });
   }
 };

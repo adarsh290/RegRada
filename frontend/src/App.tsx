@@ -1,4 +1,5 @@
-import { BrowserRouter as Router, Routes, Route, Link, useLocation, useNavigate, Navigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Link, useLocation, useNavigate, Navigate, useParams } from "react-router-dom";
+import { useEffect } from "react";
 import PipelineGraph from "./components/PipelineGraph";
 import ComplianceInbox from "./components/ComplianceInbox";
 import CircularSubmitForm from "./components/CircularSubmitForm";
@@ -7,9 +8,8 @@ import AuditDashboard from "./components/AuditDashboard";
 import ObligationGraph from "./components/ObligationGraph";
 import LoginPage from "./components/LoginPage";
 import { AuthProvider, useAuth } from "./context/authContext";
+import { authEventEmitter } from "./services/api";
 import { LayoutDashboard, Inbox, FilePlus, Building2, BarChart, GitBranch, LogOut, ShieldCheck } from "lucide-react";
-
-const DEPT_ROLES = ["IT Dept", "Retail Banking", "Legal Dept", "Operations"];
 
 function Sidebar() {
   const location = useLocation();
@@ -19,8 +19,8 @@ function Sidebar() {
   const isDeptActive = location.pathname.startsWith("/department/");
   const isCO = user?.role === "CO";
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     navigate("/");
   };
 
@@ -88,7 +88,7 @@ function Sidebar() {
             <p className="text-xs text-gray-500">{user?.role === "CO" ? "Compliance Officer" : user?.department_name}</p>
           </div>
         </div>
-        <button onClick={handleLogout} className="w-full flex items-center justify-center space-x-2 text-gray-400 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-lg transition-colors text-sm">
+        <button type="button" onClick={handleLogout} className="w-full flex items-center justify-center space-x-2 text-gray-400 hover:text-white hover:bg-gray-800 px-3 py-2 rounded-lg transition-colors text-sm">
           <LogOut size={16} /><span>Sign Out</span>
         </button>
       </div>
@@ -96,8 +96,27 @@ function Sidebar() {
   );
 }
 
+function DepartmentPortalWrapper() {
+  const { dept } = useParams<{ dept: string }>();
+  const decodedDept = dept ? decodeURIComponent(dept) : "";
+  return <DepartmentPortal department={decodedDept} />;
+}
+
 function AppLayout() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleForceLogout = async () => {
+      await logout();
+      navigate("/");
+      // Reset the redirecting flag is handled by page reload, but since we are doing SPA navigation:
+      // wait, the flag is in api.ts, it stays true unless we export a reset or just let them login.
+      // A reload is safer for reset, let's just navigate.
+    };
+    authEventEmitter.addEventListener("logout", handleForceLogout);
+    return () => authEventEmitter.removeEventListener("logout", handleForceLogout);
+  }, [logout, navigate]);
 
   return (
     <div className="flex h-screen bg-gray-950 text-white font-sans overflow-hidden">
@@ -123,7 +142,15 @@ function AppLayout() {
                 />
                 <Route
                   path="*"
-                  element={<Navigate to={`/department/${encodeURIComponent(user?.department_name || "")}`} replace />}
+                  element={
+                    user?.department_name ? (
+                      <Navigate to={`/department/${encodeURIComponent(user.department_name)}`} replace />
+                    ) : (
+                      <div className="flex items-center justify-center h-full text-gray-500">
+                        Department not found for this user.
+                      </div>
+                    )
+                  }
                 />
               </>
             )}
@@ -156,10 +183,4 @@ export default function App() {
       </Router>
     </AuthProvider>
   );
-}
-
-function DepartmentPortalWrapper() {
-  const location = useLocation();
-  const dept = decodeURIComponent(location.pathname.replace("/department/", ""));
-  return <DepartmentPortal department={dept} />;
 }

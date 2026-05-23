@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
-import { getSubmissions, getOverdueMAPs, getCirculars } from '../services/api';
+import { useState, useEffect, useRef } from 'react';
+import { getSubmissions, getOverdueMAPs, getCirculars, getConflicts, queryMaps, resolveConflict, assignMAP, overrideSubmission } from '../services/api';
 import {
   CheckCircle2, XCircle, AlertCircle, FileText, ChevronRight,
-  BrainCircuit, Calendar, FileSearch, Clock, Flame, Building2, ShieldAlert
+  BrainCircuit, Calendar, FileSearch, Clock, Flame, Building2, ShieldAlert, X
 } from 'lucide-react';
+import axios from 'axios';
+import { useAuth } from '../context/authContext';
 
 interface AIVerdict {
   is_compliant: boolean;
@@ -57,28 +59,88 @@ interface OverdueMAP {
 
 type ActiveTab = 'submissions' | 'overdue';
 
+interface Conflict {
+  circular_id_a: string;
+  map_id_a: string;
+  circular_id_b: string;
+  map_id_b: string;
+  conflict_type: string;
+  explanation: string;
+  severity: string;
+  resolved: boolean;
+  resolved_by_co?: string;
+}
+
+interface CircularWithConflicts {
+  _id: string;
+  source: string;
+  conflicts: Conflict[];
+}
+
+interface NLResult {
+  map_id: string;
+  action_title: string;
+  department: string;
+  deadline: string;
+  priority: string;
+  status: string;
+  circular_title: string;
+  circular_source: string;
+  score?: number;
+}
+
 export default function AuditDashboard() {
+  const { user } = useAuth();
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [overdueMaps, setOverdueMaps] = useState<OverdueMAP[]>([]);
   const [escalatedMaps, setEscalatedMaps] = useState<MAPWithCircular[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedSub, setSelectedSub] = useState<Submission | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('submissions');
   
   const [overrideComment, setOverrideComment] = useState("");
   const [overriding, setOverriding] = useState(false);
   const [assigningId, setAssigningId] = useState<string | null>(null);
-  const [assignDept, setAssignDept] = useState("");
+  const [assignDepts, setAssignDepts] = useState<Record<string, string>>({});
+
+  const [conflicts, setConflicts] = useState<CircularWithConflicts[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [nlResults, setNlResults] = useState<NLResult[] | null>(null);
+
+  // BUG-FE2-011/017/018: In-component error states to replace blocking alert() calls
+  const [overrideError, setOverrideError] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [conflictError, setConflictError] = useState<string | null>(null);
+  const [assignError, setAssignError] = useState<string | null>(null);
+
+  const fetchAbortControllerRef = useRef<AbortController | null>(null);
+  const queryAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    fetchAll();
+    const abortController = new AbortController();
+    fetchAll(abortController.signal);
+    return () => {
+      abortController.abort();
+    };
   }, []);
 
-  const fetchAll = async () => {
+  const fetchAll = async (signal?: AbortSignal) => {
     try {
-      const [subs, overdue, circulars] = await Promise.all([getSubmissions(), getOverdueMAPs(), getCirculars()]);
+      setError(null);
+      const [subs, overdue, circulars, confs] = await Promise.all([
+        getSubmissions(undefined, { signal }), 
+        getOverdueMAPs({ signal }), 
+        getCirculars({ signal }),
+        getConflicts({ signal })
+      ]);
+      
+      if (signal?.aborted) return;
+
       setSubmissions(subs);
       setOverdueMaps(overdue);
+      setConflicts(confs);
 
       const escalated: MAPWithCircular[] = [];
       (circulars as any[]).forEach(circ => {
@@ -87,11 +149,27 @@ export default function AuditDashboard() {
         });
       });
       setEscalatedMaps(escalated);
-    } catch (error) {
-      console.error("Failed to fetch audit data:", error);
+    } catch (err) {
+      // BUG-FE2-008: Handle both AbortController (CanceledError) and legacy cancel token patterns
+      if (axios.isCancel(err) || (err instanceof Error && (err.name === 'CanceledError' || err.name === 'AbortError'))) {
+        return;
+      }
+      console.error("Failed to fetch audit data:", err);
+      setError("Failed to fetch audit data from server.");
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
     }
+  };
+
+  const fetchAllSafe = async () => {
+    if (fetchAbortControllerRef.current) {
+      fetchAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    fetchAbortControllerRef.current = controller;
+    await fetchAll(controller.signal);
   };
 
   const total = submissions.length;
@@ -101,33 +179,80 @@ export default function AuditDashboard() {
   const handleOverride = async (verdict: 'verified' | 'rejected') => {
     if (!selectedSub || !overrideComment.trim()) return;
     setOverriding(true);
+    setOverrideError(null);
     try {
-      const axios = (await import('axios')).default;
-      await axios.put(`http://localhost:5000/api/submissions/${selectedSub._id}/override`, { verdict, comment: overrideComment });
+      await overrideSubmission(selectedSub._id, verdict, overrideComment);
       setOverrideComment("");
       setSelectedSub(null);
-      fetchAll();
+      fetchAllSafe();
     } catch (err) {
       console.error('Failed to override:', err);
-      alert('Failed to override submission.');
+      // BUG-FE2-011: Replace blocking alert() with in-component error state
+      setOverrideError('Failed to override submission. Please try again.');
     } finally {
       setOverriding(false);
     }
   };
 
   const handleAssign = async (map: MAPWithCircular) => {
-    if (!assignDept.trim()) return;
+    const dept = assignDepts[map.map_id];
+    if (!dept?.trim()) return;
     setAssigningId(map.map_id);
     try {
-      const axios = (await import('axios')).default;
-      await axios.put(`http://localhost:5000/api/circulars/${map.circular_id}/maps/${map.map_id}/assign`, { assigned_to: assignDept });
-      setAssignDept("");
-      fetchAll();
+      await assignMAP(map.circular_id, map.map_id, dept);
+      setAssignDepts(prev => {
+        const next = { ...prev };
+        delete next[map.map_id];
+        return next;
+      });
+      fetchAllSafe();
+      setAssignError(null);
+      fetchAllSafe();
     } catch (err) {
       console.error('Failed to assign:', err);
-      alert('Failed to assign department.');
+      setAssignError('Failed to assign department.');
     } finally {
       setAssigningId(null);
+    }
+  };
+
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    if (queryAbortControllerRef.current) {
+      queryAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    queryAbortControllerRef.current = controller;
+
+    try {
+      const res = await queryMaps(searchQuery, { signal: controller.signal });
+      if (!controller.signal.aborted) {
+        setNlResults(res.results);
+        setSearchError(null);
+      }
+    } catch (err) {
+      if (axios.isCancel(err) || (err instanceof Error && (err.name === 'CanceledError' || err.name === 'AbortError'))) return;
+      console.error("Search failed:", err);
+      // BUG-FE2-017: Replace blocking alert() with in-component error state
+      if (!controller.signal.aborted) setSearchError('Search failed. Please try again.');
+    } finally {
+      if (!controller.signal.aborted) {
+        setSearching(false);
+      }
+    }
+  };
+
+  const handleResolveConflict = async (circularId: string, conflictIndex: number) => {
+    setConflictError(null);
+    try {
+      await resolveConflict(circularId, conflictIndex, user?.username || "Compliance Officer");
+      fetchAllSafe();
+    } catch (err) {
+      console.error("Failed to resolve conflict:", err);
+      // BUG-FE2-018: Replace blocking alert() with in-component error state
+      setConflictError('Failed to resolve conflict. Please try again.');
     }
   };
 
@@ -182,6 +307,28 @@ export default function AuditDashboard() {
     );
   }
 
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 max-w-lg mx-auto text-center space-y-4">
+        <div className="p-3 bg-red-500/10 rounded-full border border-red-500/20 text-red-400">
+          <AlertCircle size={32} />
+        </div>
+        <h2 className="text-xl font-bold text-white">Failed to Load Audit Data</h2>
+        <p className="text-gray-400 text-sm">{error}</p>
+        <button
+          onClick={() => {
+            setLoading(true);
+            // BUG-FE2-007: Use fetchAllSafe to properly manage AbortController and avoid unmounted state updates
+            fetchAllSafe();
+          }}
+          className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-2.5 rounded-lg transition-colors shadow-lg"
+        >
+          Try Again
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8 max-w-7xl mx-auto h-full overflow-y-auto">
       {/* Header */}
@@ -195,6 +342,35 @@ export default function AuditDashboard() {
           <span className="text-gray-300 text-sm font-medium">AI Validation Engine Active</span>
         </div>
       </div>
+
+      {/* NL Query Search Bar */}
+      <div className="mb-6">
+        <form onSubmit={handleSearch} className="relative">
+          <input
+            type="text"
+            aria-label="Search compliance data"
+            placeholder="Ask anything — 'what must we complete before July?'"
+            className="w-full bg-gray-900 border border-gray-800 rounded-xl py-3 pl-10 pr-4 text-white focus:outline-none focus:border-blue-500 transition-colors"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          <FileSearch className="absolute left-3 top-3.5 text-gray-400" size={18} />
+          {searching && <div className="absolute right-3 top-3.5 w-5 h-5 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />}
+          {nlResults && !searching && (
+            <button type="button" onClick={() => { setNlResults(null); setSearchQuery(""); }} className="absolute right-3 top-3.5 text-gray-400 hover:text-white">
+              <XCircle size={18} />
+            </button>
+          )}
+        </form>
+      </div>
+
+      {/* BUG-FE2-017: Inline search error instead of blocking alert() */}
+      {searchError && (
+        <div className="mb-4 flex items-center justify-between bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">
+          <span className="text-sm text-red-400">{searchError}</span>
+          <button type="button" onClick={() => setSearchError(null)} className="ml-3 text-red-400 hover:text-red-300">✕</button>
+        </div>
+      )}
 
       {/* Overdue Alert Banner */}
       {overdueMaps.length > 0 && (
@@ -222,7 +398,7 @@ export default function AuditDashboard() {
       )}
 
       {/* Escalated Action Required Banner */}
-      {escalatedMaps.length > 0 && (
+      {user?.role === 'CO' && escalatedMaps.length > 0 && (
         <div className="mb-6 bg-amber-500/10 border border-amber-500/30 rounded-xl p-6">
           <div className="flex items-center space-x-3 mb-4">
             <div className="p-2 bg-amber-500/20 rounded-lg">
@@ -238,8 +414,15 @@ export default function AuditDashboard() {
             </div>
           </div>
           <div className="space-y-4 mt-4">
+            {assignError && (
+              <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center text-red-400 text-sm">
+                <AlertCircle size={16} className="mr-2" />
+                {assignError}
+              </div>
+            )}
             {escalatedMaps.map(map => (
-              <div key={map.map_id} className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              // BUG-FE2-024: Use compound key since map_id is only unique within a circular
+              <div key={`${map.circular_id}-${map.map_id}`} className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div>
                   <div className="flex items-center space-x-2 mb-1">
                     <span className="font-mono text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700">{map.map_id}</span>
@@ -255,24 +438,79 @@ export default function AuditDashboard() {
                 <div className="flex items-center space-x-2 w-full sm:w-auto">
                   <input 
                     type="text" 
+                    aria-label="Department Name to assign"
                     placeholder="Dept Name (e.g., IT Dept)"
                     className="bg-gray-950 border border-gray-700 rounded p-2 text-sm text-white w-48"
-                    value={assigningId === map.map_id ? assignDept : ""}
+                    value={assignDepts[map.map_id] || ""}
                     onChange={(e) => {
-                      setAssigningId(map.map_id);
-                      setAssignDept(e.target.value);
+                      setAssignDepts(prev => ({ ...prev, [map.map_id]: e.target.value }));
                     }}
                   />
                   <button 
                     onClick={() => handleAssign(map)}
-                    disabled={assigningId === map.map_id ? !assignDept.trim() : true}
+                    disabled={assigningId === map.map_id || !assignDepts[map.map_id]?.trim()}
                     className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold px-4 py-2 rounded transition-colors"
                   >
-                    Force Assign
+                    {assigningId === map.map_id ? "Assigning..." : "Force Assign"}
                   </button>
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Conflicts Banner */}
+      {conflicts.length > 0 && (
+        <div className="mb-6 bg-red-500/10 border border-red-500/30 rounded-xl p-6">
+          <div className="flex items-center space-x-3 mb-4">
+            <div className="p-2 bg-red-500/20 rounded-lg">
+              <Flame size={22} className="text-red-400" />
+            </div>
+            <div>
+              <h3 className="text-red-400 font-bold text-base">
+                Action Required: {conflicts.length} Circulars with Conflicts
+              </h3>
+              <p className="text-red-300/70 text-sm mt-0.5">
+                Contradictory requirements, deadline conflicts, or jurisdiction overlaps detected.
+              </p>
+            </div>
+          </div>
+          {conflictError && (
+            <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between text-red-400 text-sm">
+              <div className="flex items-center">
+                <AlertCircle size={16} className="mr-2" />
+                {conflictError}
+              </div>
+              <button type="button" onClick={() => setConflictError(null)} className="text-red-400 hover:text-red-200"><X size={16} /></button>
+            </div>
+          )}
+          <div className="space-y-4 mt-4">
+            {conflicts.flatMap(circ => 
+              circ.conflicts
+                .map((c: any, idx: number) => ({ c, idx }))
+                .filter(({ c }: any) => !c.resolved)
+                .map(({ c, idx }: any) => (
+                <div key={`${circ._id}-${c.map_id_a}-${c.map_id_b}`} className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-col sm:flex-row items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center space-x-2 mb-1">
+                      <span className="font-mono text-xs text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded border border-red-500/20">{c.conflict_type.replace(/_/g, ' ')}</span>
+                      <span className="text-xs text-gray-400">Severity: {c.severity}</span>
+                    </div>
+                    <p className="text-sm font-medium text-gray-200 mb-2">{c.explanation}</p>
+                    <div className="text-xs text-gray-400 bg-gray-800 p-2 rounded border border-gray-700">
+                      <span className="font-bold">MAP A:</span> {circ.source} ({c.map_id_a}) vs <span className="font-bold">MAP B:</span> {c.circular_id_b} ({c.map_id_b})
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => handleResolveConflict(circ._id, idx)}
+                    className="bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 text-sm font-bold px-4 py-2 rounded transition-colors whitespace-nowrap"
+                  >
+                    Resolve Conflict
+                  </button>
+                </div>
+              ))
+            )}
           </div>
         </div>
       )}
@@ -339,7 +577,9 @@ export default function AuditDashboard() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === 'submissions' ? (
+      {nlResults ? (
+        <QueryResultsTable results={nlResults} getStatusBadge={getStatusBadge} />
+      ) : activeTab === 'submissions' ? (
         <SubmissionsTable submissions={submissions} getStatusBadge={getStatusBadge} onSelect={setSelectedSub} />
       ) : (
         <OverdueTable overdueMaps={overdueMaps} getPriorityColor={getPriorityColor} getUrgencyColor={getUrgencyColor} />
@@ -360,7 +600,7 @@ export default function AuditDashboard() {
                 </div>
                 <h3 className="text-base font-bold text-white leading-snug">{selectedSub.map_action}</h3>
               </div>
-              <button onClick={() => setSelectedSub(null)} className="text-gray-500 hover:text-white transition-colors p-1 ml-4">
+              <button onClick={() => setSelectedSub(null)} aria-label="Close AI report" className="text-gray-500 hover:text-white transition-colors p-1 ml-4">
                 <XCircle size={24} />
               </button>
             </div>
@@ -379,8 +619,8 @@ export default function AuditDashboard() {
                     <AlertCircle size={14} className="mr-2" /> Identified Gaps
                   </h4>
                   <ul className="bg-red-500/5 border border-red-500/20 rounded-xl p-4 space-y-2">
-                    {selectedSub.ai_verdict.missing_items.map((item, idx) => (
-                      <li key={idx} className="flex items-start text-sm text-red-300/90">
+                    {selectedSub.ai_verdict.missing_items.map((item) => (
+                      <li key={item} className="flex items-start text-sm text-red-300/90">
                         <span className="text-red-500 mr-2 font-bold">•</span>
                         <span className="leading-relaxed">{item}</span>
                       </li>
@@ -400,34 +640,44 @@ export default function AuditDashboard() {
               </div>
 
               {/* CO Override Section */}
-              <div className="border-t border-gray-800 pt-5 mt-5">
-                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Compliance Officer Override</h4>
-                <div className="flex flex-col space-y-3">
-                  <input 
-                    type="text" 
-                    placeholder="Reason for overriding the AI verdict..."
-                    className="bg-gray-950 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 outline-none w-full"
-                    value={overrideComment}
-                    onChange={(e) => setOverrideComment(e.target.value)}
-                  />
-                  <div className="flex space-x-3">
-                    <button 
-                      onClick={() => handleOverride('verified')}
-                      disabled={overriding || !overrideComment.trim() || selectedSub.status === 'verified'}
-                      className="flex-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 font-bold px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
-                    >
-                      Force Verify
-                    </button>
-                    <button 
-                      onClick={() => handleOverride('rejected')}
-                      disabled={overriding || !overrideComment.trim() || selectedSub.status === 'rejected'}
-                      className="flex-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 font-bold px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
-                    >
-                      Force Reject
-                    </button>
+              {user?.role === 'CO' && (
+                <div className="border-t border-gray-800 pt-5 mt-5">
+                  <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Compliance Officer Override</h4>
+                  <div className="flex flex-col space-y-3">
+                    <input 
+                      type="text" 
+                      aria-label="Reason for overriding the AI verdict"
+                      placeholder="Reason for overriding the AI verdict..."
+                      className="bg-gray-950 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 outline-none w-full"
+                      value={overrideComment}
+                      onChange={(e) => setOverrideComment(e.target.value)}
+                    />
+                    <div className="flex space-x-3">
+                      <button 
+                        onClick={() => handleOverride('verified')}
+                        disabled={overriding || !overrideComment.trim() || selectedSub.status === 'verified'}
+                        className="flex-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 font-bold px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+                      >
+                        Force Verify
+                      </button>
+                      <button 
+                        onClick={() => handleOverride('rejected')}
+                        disabled={overriding || !overrideComment.trim() || selectedSub.status === 'rejected'}
+                        className="flex-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 font-bold px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+                      >
+                        Force Reject
+                      </button>
+                    </div>
+                    {/* BUG-FE2-011: Inline override error */}
+                    {overrideError && (
+                      <div className="flex items-center justify-between bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                        <span className="text-xs text-red-400">{overrideError}</span>
+                        <button type="button" onClick={() => setOverrideError(null)} className="ml-2 text-red-400 hover:text-red-300 text-xs">✕</button>
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         </div>
@@ -485,7 +735,7 @@ function SubmissionsTable({
                     </div>
                     <div className="flex items-center space-x-1 mt-1 text-[10px] text-gray-500">
                       <Calendar size={10} />
-                      <span>{new Date(sub.submitted_at).toLocaleDateString()}</span>
+                      <span>{sub.submitted_at ? new Date(sub.submitted_at).toLocaleDateString() : 'Unknown'}</span>
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">{getStatusBadge(sub.status, sub.ai_verdict)}</td>
@@ -581,8 +831,57 @@ function OverdueTable({
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <span className="text-[10px] font-bold uppercase px-2 py-1 rounded border bg-gray-800 text-gray-300 border-gray-700">
-                    {map.status.replace('_', ' ')}
+                    {/* BUG-FE2-025: Use regex global flag to replace ALL underscores */}
+                    {map.status.replace(/_/g, ' ')}
                   </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function QueryResultsTable({ results, getStatusBadge }: any) {
+  return (
+    <div className="bg-gray-900 border border-blue-500/20 rounded-xl overflow-hidden">
+      <div className="px-6 py-4 border-b border-blue-500/20 bg-blue-500/5 flex items-center space-x-3">
+        <FileSearch size={18} className="text-blue-400" />
+        <h2 className="text-sm font-bold text-blue-400 uppercase tracking-wider">
+          Search Results ({results.length})
+        </h2>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="text-xs uppercase tracking-wider text-gray-500 border-b border-gray-800 bg-gray-950/30">
+              <th className="px-6 py-3 font-medium">Relevance</th>
+              <th className="px-6 py-3 font-medium">Action Point</th>
+              <th className="px-6 py-3 font-medium">Department</th>
+              <th className="px-6 py-3 font-medium">Deadline</th>
+              <th className="px-6 py-3 font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800/50">
+            {results.map((r: any) => (
+              <tr key={r.map_id} className="hover:bg-blue-500/5 transition-colors">
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-400 font-bold">
+                  {Math.round(r.relevance_score * 100)}%
+                </td>
+                <td className="px-6 py-4">
+                  <p className="text-sm text-gray-200">{r.action_title}</p>
+                  <p className="text-xs text-gray-500 mt-1 italic">{r.relevance_reason}</p>
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-300">
+                  {r.department}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-400">
+                  {r.deadline}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap">
+                  {getStatusBadge(r.live_status || 'pending')}
                 </td>
               </tr>
             ))}

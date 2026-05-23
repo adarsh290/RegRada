@@ -1,7 +1,6 @@
 import cron from "node-cron";
 import nodemailer from "nodemailer";
 import Circular from "../models/Circular";
-import Submission from "../models/Submission";
 
 // ── Email Transporter ────────────────────────────────────────
 // Uses ethereal.email for dev (catches all emails, no real sending).
@@ -9,7 +8,8 @@ import Submission from "../models/Submission";
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.ethereal.email",
   port: Number(process.env.SMTP_PORT) || 587,
-  secure: false,
+  // BUG-BE2-036: Use true if port is 465 (SMTPS), otherwise false
+  secure: Number(process.env.SMTP_PORT) === 465,
   auth: {
     user: process.env.SMTP_USER || "regradar-notifications@ethereal.email",
     pass: process.env.SMTP_PASS || "",
@@ -19,13 +19,24 @@ const transporter = nodemailer.createTransport({
 const FROM_EMAIL = process.env.FROM_EMAIL || "RegRadar Notifications <noreply@regradar.com>";
 const CO_EMAIL = process.env.CO_EMAIL || "compliance.officer@regradar.com";
 
+function escapeHtml(str: any): string {
+  if (str === null || str === undefined) return "";
+  const s = String(str);
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 function buildOverdueEmail(items: any[]) {
   const rows = items.map(m => `
     <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${m.map_id}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${m.action_title}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${m.department}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;color:#f87171;">${m.days_overdue} days</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${escapeHtml(m.map_id)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${escapeHtml(m.action_title)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${escapeHtml(m.department)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;color:#f87171;">${escapeHtml(m.days_overdue)} days</td>
     </tr>`).join("");
 
   return `
@@ -50,9 +61,9 @@ function buildOverdueEmail(items: any[]) {
 function buildEscalatedEmail(maps: any[]) {
   const rows = maps.map(m => `
     <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${m.map_id}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${m.action_title}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${m.circular_title || "N/A"}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${escapeHtml(m.map_id)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${escapeHtml(m.action_title)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #2a2a3a;">${escapeHtml(m.circular_title || "N/A")}</td>
     </tr>`).join("");
 
   return `
@@ -81,30 +92,38 @@ async function sendNotifications() {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const circulars = await Circular.find();
-
     // ── 1. Overdue MAPs ──────────────────────────────────────
+    // BUG-BE2-013: Add $limit to prevent loading entire collection into memory
+    const overdueAgg = await Circular.aggregate([
+      { $unwind: "$maps" },
+      { $match: { 
+          "maps.status": { $nin: ["verified", "escalated"] },
+          "maps.deadline": { $nin: [null, "", "Not specified"] }
+      }},
+      { $limit: 5000 } // Safety cap — tune per deployment
+    ]);
+
     const overdue: any[] = [];
-    const escalated: any[] = [];
-
-    for (const circ of circulars) {
-      for (const map of circ.maps) {
-        if (map.status === "escalated") {
-          escalated.push({ ...map.toObject(), circular_title: circ.title });
-        }
-
-        if (map.status === "verified") continue;
-        if (!map.deadline || map.deadline === "Not specified") continue;
-        const deadlineDate = new Date(map.deadline);
-        if (isNaN(deadlineDate.getTime())) continue;
-        deadlineDate.setHours(0, 0, 0, 0);
-        const diffMs = today.getTime() - deadlineDate.getTime();
-        const daysOverdue = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        if (daysOverdue > 0) {
-          overdue.push({ ...map.toObject(), days_overdue: daysOverdue });
-        }
+    for (const doc of overdueAgg) {
+      const map = doc.maps;
+      const deadlineDate = new Date(map.deadline);
+      if (isNaN(deadlineDate.getTime())) continue;
+      deadlineDate.setHours(0, 0, 0, 0);
+      const diffMs = today.getTime() - deadlineDate.getTime();
+      const daysOverdue = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      if (daysOverdue > 0) {
+        overdue.push({ ...map, circular_title: doc.title, days_overdue: daysOverdue });
       }
     }
+
+    const escalatedAgg = await Circular.aggregate([
+      { $unwind: "$maps" },
+      { $match: { "maps.status": "escalated" } },
+      { $limit: 5000 } // Safety cap
+    ]);
+
+    
+    const escalated = escalatedAgg.map(doc => ({ ...doc.maps, circular_title: doc.title }));
 
     // ── 2. Send Overdue Alert to CO ──────────────────────────
     if (overdue.length > 0) {
@@ -143,8 +162,12 @@ async function sendNotifications() {
 export function startCronService() {
   console.log("⏰ Cron service started — notifications scheduled daily at 08:00 AM");
 
-  // Run immediately on startup for dev visibility
-  sendNotifications();
+  // Run with a 30-second grace period on startup for dev visibility to prevent crash-loop storms
+  setTimeout(() => {
+    console.log("⏰ [Cron] Running initial startup notification check...");
+    // BUG-BE2-027: Catch rejected promise to prevent unhandled rejection crash
+    sendNotifications().catch(console.error);
+  }, 30000);
 
   cron.schedule("0 8 * * *", sendNotifications);
 }

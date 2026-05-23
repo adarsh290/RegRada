@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { getCirculars, getSubmissions } from '../services/api';
+import { getCirculars, getSubmissions, rejectMAP } from '../services/api';
 import ProofUploadModal from './ProofUploadModal';
 import {
   Building2, ClipboardList, CheckCircle2, Clock, AlertCircle,
   XCircle, ChevronRight, FileCheck, Upload
 } from 'lucide-react';
+import axios from 'axios';
 
 interface MAP {
   _id: string;
@@ -47,6 +48,8 @@ interface Submission {
   original_filename: string;
   submitted_at: string;
   ai_verdict?: AIVerdict;
+  // BUG-CONTRACT-022: Add proof_files to Submission interface
+  proof_files?: { original_filename: string; file_size: number; file_path?: string }[];
 }
 
 interface DepartmentPortalProps {
@@ -57,22 +60,31 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
   const [myMaps, setMyMaps] = useState<MAPWithCircular[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
-  const [uploadTarget, setUploadTarget] = useState<MAPWithCircular | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [uploadTarget, setUploadTarget] = useState<{ circular_id: string; map_id: string; action_title: string } | null>(null);
   const [rejectTarget, setRejectTarget] = useState<MAPWithCircular | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [rejecting, setRejecting] = useState(false);
+  const [rejectError, setRejectError] = useState(''); // BUG-FE2-016: Inline error state for reject modal
 
   useEffect(() => {
-    fetchData();
+    const abortController = new AbortController();
+    fetchData(abortController.signal);
+    return () => {
+      abortController.abort();
+    };
   }, [department]);
 
-  const fetchData = async () => {
+  const fetchData = async (signal?: AbortSignal) => {
     setLoading(true);
+    setError(null);
     try {
       const [circulars, subs] = await Promise.all([
-        getCirculars(),
-        getSubmissions(department),
+        getCirculars({ signal }),
+        getSubmissions(department, { signal }),
       ]);
+
+      if (signal?.aborted) return;
 
       // Flatten MAPs across all circulars, filtered by this department
       const maps: MAPWithCircular[] = [];
@@ -92,9 +104,16 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
       setMyMaps(maps);
       setSubmissions(subs);
     } catch (err) {
+      // BUG-FE2-003: Narrow err type before accessing .name to avoid TypeScript error and runtime risk
+      if (axios.isCancel(err) || (err instanceof Error && err.name === 'CanceledError')) {
+        return;
+      }
       console.error('Failed to load department data:', err);
+      setError('Failed to load department data from server.');
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
     }
   };
 
@@ -104,15 +123,20 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
   const handleReject = async () => {
     if (!rejectTarget || !rejectReason.trim()) return;
     setRejecting(true);
+    setRejectError('');
     try {
-      const axios = (await import('axios')).default;
-      await axios.post(`http://localhost:5000/api/circulars/${rejectTarget.circular_id}/maps/${rejectTarget.map_id}/reject`, { reason: rejectReason });
+      await rejectMAP(rejectTarget.circular_id, rejectTarget.map_id, rejectReason);
+      // BUG-FE2-010: Remove dangling AbortController — the useEffect cleanup handles mount-level abort.
+      // A best-effort refresh here does not need an isolated controller.
+      await fetchData();
       setRejectTarget(null);
       setRejectReason('');
-      fetchData();
     } catch (err) {
-      console.error('Failed to reject task:', err);
-      alert('Failed to reject task. Please try again.');
+      if (axios.isAxiosError(err)) {
+        setRejectError(err.response?.data?.error || "Failed to reject task. Please try again.");
+      } else {
+        setRejectError("Failed to reject task. Please try again.");
+      }
     } finally {
       setRejecting(false);
     }
@@ -120,7 +144,8 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
 
   const stats = {
     total: myMaps.length,
-    pending: myMaps.filter((m) => m.status === 'pending').length,
+    // BUG-FE2-019: Only count truly 'pending' or 'in_progress' as pending — not rejected/escalated
+    pending: myMaps.filter((m) => ['pending', 'in_progress'].includes(m.status)).length,
     submitted: myMaps.filter((m) => m.status === 'submitted').length,
     verified: myMaps.filter((m) => m.status === 'verified').length,
   };
@@ -159,6 +184,26 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
           <div className="w-12 h-12 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mb-4" />
           <p className="text-gray-400 font-medium">Loading your action items...</p>
         </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 max-w-lg mx-auto text-center space-y-4">
+        <div className="p-3 bg-red-500/10 rounded-full border border-red-500/20 text-red-400">
+          <AlertCircle size={32} />
+        </div>
+        <h2 className="text-xl font-bold text-white">Failed to Load Portal Data</h2>
+        <p className="text-gray-400 text-sm">{error}</p>
+        <button
+          onClick={() => {
+            fetchData();
+          }}
+          className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-2.5 rounded-lg transition-colors shadow-lg"
+        >
+          Try Again
+        </button>
       </div>
     );
   }
@@ -357,8 +402,19 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
               </h3>
             </div>
             <div className="p-6">
-              <p className="text-gray-300 text-sm mb-4">Please provide a reason for rejecting this task. The AI will re-evaluate its assignment based on your feedback.</p>
+              {rejectError && (
+                <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start text-red-400 text-sm">
+                  <AlertCircle size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                  <p>{rejectError}</p>
+                </div>
+              )}
+              {/* BUG-FE2-028: Added missing accessible label for textarea */}
+              <label htmlFor="reject-reason" className="block text-gray-300 text-sm mb-2 font-medium">
+                Reason for Rejection
+              </label>
+              <p className="text-gray-400 text-xs mb-4">Please provide a reason for rejecting this task. The AI will re-evaluate its assignment based on your feedback.</p>
               <textarea
+                id="reject-reason"
                 className="w-full bg-gray-950 border border-gray-700 rounded-lg p-3 text-white focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none transition-colors"
                 rows={4}
                 placeholder="E.g., This system was decommissioned, or this falls under the Legal department's purview."

@@ -18,7 +18,7 @@ export interface ISubmission extends Document {
   department: string;
   proof_files: { file_path: string; original_filename: string; file_size: number }[];
   notes: string;
-  status: "submitted" | "verified" | "rejected";
+  status: "submitted" | "pending_review" | "verified" | "rejected";
   ai_verdict?: IAIVerdict;
   overridden_by_co: boolean;
   co_comment: string;
@@ -62,7 +62,7 @@ const SubmissionSchema = new Schema<ISubmission>(
     notes: { type: String, default: "" },
     status: {
       type: String,
-      enum: ["submitted", "verified", "rejected"],
+      enum: ["submitted", "pending_review", "verified", "rejected"],
       default: "submitted",
     },
     ai_verdict: { type: AIVerdictSchema },
@@ -75,6 +75,32 @@ const SubmissionSchema = new Schema<ISubmission>(
     timestamps: { createdAt: "created_at", updatedAt: "updated_at" },
   }
 );
+
+// Map nested proof_files[0].original_filename to top-level for frontend compatibility
+// BUG-SEC-012: Exclude file_path from toJSON to prevent server path disclosure
+SubmissionSchema.set("toJSON", {
+  virtuals: true,
+  transform: (doc, ret: any) => {
+    ret.id = ret._id;
+    if (ret.proof_files && ret.proof_files.length > 0) {
+      ret.original_filename = ret.proof_files[0].original_filename;
+      // BUG-BE2-030: Map to new array instead of mutating in-place to avoid corrupting in-memory document
+      ret.proof_files = ret.proof_files.map((file: any) => {
+        const { file_path, ...safeFile } = file;
+        return safeFile;
+      });
+    } else {
+      ret.original_filename = "";
+    }
+    return ret;
+  }
+});
+
+SubmissionSchema.index({ circular_id: 1 });
+SubmissionSchema.index({ map_id: 1 });
+SubmissionSchema.index({ department: 1 });
+// BUG-SEC-027: Compound unique index to prevent duplicate submissions for the same MAP by the same department
+SubmissionSchema.index({ circular_id: 1, map_id: 1, department: 1 }, { unique: true });
 
 export default mongoose.model<ISubmission>("Submission", SubmissionSchema);
 

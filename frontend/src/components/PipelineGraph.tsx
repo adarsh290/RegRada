@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState, useRef } from 'react';
 import {
   ReactFlow,
   Controls,
@@ -12,6 +12,7 @@ import {
   type Edge
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import axios from 'axios';
 import { getCirculars, getOverdueMAPs, getSources, addSource, scrapeSource } from '../services/api';
 import { Database, Bot, ShieldCheck, Building2, Server, ShieldAlert, Plus, RefreshCw, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -101,9 +102,30 @@ export default function PipelineGraph() {
   const [newSourceName, setNewSourceName] = useState('');
   const [newSourceUrl, setNewSourceUrl] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // BUG-FE2-005: In-component error state to replace blocking alert() calls
+  const [scrapeError, setScrapeError] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  const handleScrape = async (sourceId: string) => {
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    // BUG-FE2-040: Removed redundant isMountedRef.current = true
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  // BUG-FE2-035: Add global escape key listener for modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowAddSource(false);
+    };
+    if (showAddSource) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showAddSource]);
+
+  const fetchStatusRef = useRef<() => Promise<void>>(undefined);
+
+  const handleScrape = useCallback(async (sourceId: string) => {
     // Set scraping state
     setNodes(nds => nds.map(n => 
       n.id === `src-${sourceId}` ? { ...n, data: { ...n.data, isScraping: true, badge: 'Scraping...' } } : n
@@ -114,24 +136,33 @@ export default function PipelineGraph() {
       setNodes(nds => nds.map(n => 
         n.id === `src-${sourceId}` ? { ...n, data: { ...n.data, isScraping: false, badge: 'Scraped Just Now' } } : n
       ));
-      fetchStatus(); // refresh dashboard
-    } catch (err: any) {
+      fetchStatusRef.current?.(); // refresh dashboard
+    } catch (err) {
+      // BUG-FE2-005: Replace blocking alert() with in-component error state
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data?.details || err.message)
+        : (err as Error).message;
+      setScrapeError(`Scraping failed: ${msg}`);
       console.error("Scraping failed", err);
-      alert(`Scraping failed: ${err.response?.data?.details || err.message}`);
       setNodes(nds => nds.map(n => 
         n.id === `src-${sourceId}` ? { ...n, data: { ...n.data, isScraping: false, badge: 'Error' } } : n
       ));
     }
-  };
+  }, [setNodes]);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const [circulars, overdue, sources] = await Promise.all([getCirculars(), getOverdueMAPs(), getSources()]);
-      const parsedCount = circulars.filter((c: any) => c.status === 'parsed').length;
+      // BUG-FE2-013: Type API responses instead of using any
+      interface CircularResponse { status: string; }
+      interface SourceResponse { _id: string; name: string; url: string; last_scraped: string | null; }
+      const [circulars, overdue, sources]: [CircularResponse[], unknown[], SourceResponse[]] = await Promise.all([getCirculars(), getOverdueMAPs(), getSources()]);
+      if (!isMountedRef.current) return;
+      
+      const parsedCount = circulars.filter((c: CircularResponse) => c.status === 'parsed').length;
       setOverdueCount(overdue.length);
       
       // Build Source Nodes
-      const sourceNodes: CustomNodeType[] = sources.map((s: any, idx: number) => ({
+      const sourceNodes: CustomNodeType[] = sources.map((s: SourceResponse, idx: number) => ({
         id: `src-${s._id}`,
         type: 'customNode',
         position: { x: 50, y: 100 + (idx * 150) },
@@ -147,7 +178,7 @@ export default function PipelineGraph() {
       }));
 
       // Connect Source nodes to Monitor Agent
-      const sourceEdges: Edge[] = sources.map((s: any) => ({
+      const sourceEdges: Edge[] = sources.map((s: SourceResponse) => ({
         id: `e-src-${s._id}`,
         source: `src-${s._id}`,
         target: 'agent-monitor',
@@ -185,14 +216,20 @@ export default function PipelineGraph() {
     } catch (err) {
       console.error("Failed to fetch status:", err);
     }
-  }, [setNodes, setEdges]); // handleScrape intentionally omitted from deps to avoid loop
+  }, [setNodes, setEdges, handleScrape]);
 
   useEffect(() => {
-    fetchStatus();
-    // Only poll every 10s to avoid overriding scraping state too aggressively
-    const interval = setInterval(fetchStatus, 10000);
-    return () => clearInterval(interval);
+    fetchStatusRef.current = fetchStatus;
   }, [fetchStatus]);
+
+  useEffect(() => {
+    fetchStatusRef.current?.();
+    // Only poll every 10s to avoid overriding scraping state too aggressively
+    const interval = setInterval(() => {
+      fetchStatusRef.current?.();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleAddSource = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -202,9 +239,12 @@ export default function PipelineGraph() {
       setShowAddSource(false);
       setNewSourceName('');
       setNewSourceUrl('');
-      fetchStatus();
-    } catch (err: any) {
-      alert("Failed to add source");
+      // BUG-FE2-014: Consistent fetchStatus call pattern
+      fetchStatusRef.current?.();
+    } catch (err) {
+      // BUG-FE2-005: Replace blocking alert() with in-component error state
+      const msg = axios.isAxiosError(err) ? (err.response?.data?.error || "Failed to add source") : "Failed to add source";
+      setScrapeError(msg);
       console.error(err);
     } finally {
       setIsSubmitting(false);
@@ -215,7 +255,7 @@ export default function PipelineGraph() {
     <div className="w-full h-full bg-gray-950 relative">
       {/* Overdue Alert Overlay */}
       {overdueCount > 0 && (
-        <div
+        <button
           className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center space-x-3 bg-red-500/15 border border-red-500/40 backdrop-blur-sm px-5 py-3 rounded-xl shadow-xl cursor-pointer hover:bg-red-500/25 transition-colors"
           onClick={() => navigate('/audit')}
         >
@@ -224,6 +264,14 @@ export default function PipelineGraph() {
             Autonomous Monitor: {overdueCount} overdue MAP{overdueCount > 1 ? 's' : ''} detected
           </span>
           <span className="text-red-400/70 text-xs">→ View in Audit Report</span>
+        </button>
+      )}
+
+      {/* BUG-FE2-005: Inline error toast instead of blocking alert() */}
+      {scrapeError && (
+        <div className="absolute bottom-6 right-6 z-20 flex items-center space-x-3 bg-red-900/90 border border-red-500/40 backdrop-blur-sm px-4 py-3 rounded-xl shadow-xl max-w-sm">
+          <span className="text-red-300 text-sm flex-1">{scrapeError}</span>
+          <button type="button" onClick={() => setScrapeError(null)} className="text-red-400 hover:text-red-200 flex-shrink-0">✕</button>
         </div>
       )}
 
@@ -238,19 +286,25 @@ export default function PipelineGraph() {
 
       {/* Add Source Modal */}
       {showAddSource && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div 
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-source-title"
+        >
           <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-md p-6 shadow-2xl">
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-bold text-white">Add Scraper Source</h3>
-              <button onClick={() => setShowAddSource(false)} className="text-gray-400 hover:text-white">
+              <h3 id="add-source-title" className="text-xl font-bold text-white">Add Scraper Source</h3>
+              <button type="button" onClick={() => setShowAddSource(false)} aria-label="Close add source dialog" className="text-gray-400 hover:text-white">
                 <X size={20} />
               </button>
             </div>
             
             <form onSubmit={handleAddSource} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Source Name</label>
+                <label htmlFor="source-name" className="block text-sm font-medium text-gray-300 mb-1">Source Name</label>
                 <input 
+                  id="source-name"
                   type="text" 
                   required
                   placeholder="e.g. RBI Master Directions"
@@ -260,8 +314,9 @@ export default function PipelineGraph() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Target URL</label>
+                <label htmlFor="target-url" className="block text-sm font-medium text-gray-300 mb-1">Target URL</label>
                 <input 
+                  id="target-url"
                   type="url" 
                   required
                   placeholder="https://rbi.org.in/..."

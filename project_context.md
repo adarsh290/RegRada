@@ -2,7 +2,7 @@
 
 This document serves as a permanent reference for the RegRadar codebase. It is intended for developers and AI agents — read this before making any changes to avoid redundant codebase scanning.
 
-> Last updated: 2026-05-22 (reflects Phase 1 + Phase 2 upgrades)
+> Last updated: 2026-05-23 (reflects Phase 1-6 upgrades + Full Re-Audit Bug Fixes)
 
 ---
 
@@ -258,7 +258,7 @@ interface IUser {
 ## Known Issues / TODOs / Gotchas
 
 - **Ollama Required**: The AI service needs `ollama run llama3.1` running before any parse/validate/reevaluate calls will work.
-- **No auth on API routes yet**: The auth middleware (`authenticate`) is built and working but not yet applied to circular/submission routes — they are still open. Apply `authenticate` middleware in routes if you want full lockdown.
+- **Full API Route Security**: The auth middleware (`authenticate` and `requireCO`) is rigorously applied across all routes. CO-only actions and departmental portals are fully isolated and protected against IDOR.
 - **File storage is local**: Uploaded proof files live in `backend/uploads/`. No S3 or cloud storage. Files persist across restarts but are not backed up.
 - **Multi-doc text concatenation**: All proof files are byte-concatenated before sending to the validation graph. Very large batches (e.g., 5 × 10MB PDFs) may cause context window issues with smaller local models.
 - **Dependency detection cap**: Hard-capped at 10 MAPs to prevent context overflow.
