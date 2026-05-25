@@ -79,14 +79,17 @@ interface CircularWithConflicts {
 
 interface NLResult {
   map_id: string;
+  circular_id?: string;
   action_title: string;
   department: string;
   deadline: string;
   priority: string;
   status: string;
+  live_status?: string;
   circular_title: string;
   circular_source: string;
-  score?: number;
+  relevance_score: number;
+  relevance_reason?: string;
 }
 
 export default function AuditDashboard() {
@@ -205,8 +208,8 @@ export default function AuditDashboard() {
         delete next[map.map_id];
         return next;
       });
-      fetchAllSafe();
       setAssignError(null);
+      // BUG-FIX: Only call fetchAllSafe once — was erroneously called twice
       fetchAllSafe();
     } catch (err) {
       console.error('Failed to assign:', err);
@@ -844,7 +847,7 @@ function OverdueTable({
   );
 }
 
-function QueryResultsTable({ results, getStatusBadge }: any) {
+function QueryResultsTable({ results, getStatusBadge }: { results: NLResult[]; getStatusBadge: (status: string, verdict?: AIVerdict) => React.ReactNode }) {
   return (
     <div className="bg-gray-900 border border-blue-500/20 rounded-xl overflow-hidden">
       <div className="px-6 py-4 border-b border-blue-500/20 bg-blue-500/5 flex items-center space-x-3">
@@ -865,14 +868,14 @@ function QueryResultsTable({ results, getStatusBadge }: any) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/50">
-            {results.map((r: any) => (
-              <tr key={r.map_id} className="hover:bg-blue-500/5 transition-colors">
+            {results.map((r) => (
+              <tr key={`${r.circular_id || ''}-${r.map_id}`} className="hover:bg-blue-500/5 transition-colors">
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-400 font-bold">
-                  {Math.round(r.relevance_score * 100)}%
+                  {typeof r.relevance_score === 'number' ? `${Math.round(r.relevance_score * 100)}%` : 'N/A'}
                 </td>
                 <td className="px-6 py-4">
                   <p className="text-sm text-gray-200">{r.action_title}</p>
-                  <p className="text-xs text-gray-500 mt-1 italic">{r.relevance_reason}</p>
+                  {r.relevance_reason && <p className="text-xs text-gray-500 mt-1 italic">{r.relevance_reason}</p>}
                 </td>
                 <td className="px-6 py-4 text-sm text-gray-300">
                   {r.department}
@@ -881,7 +884,7 @@ function QueryResultsTable({ results, getStatusBadge }: any) {
                   {r.deadline}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  {getStatusBadge(r.live_status || 'pending')}
+                  {getStatusBadge(r.live_status || r.status || 'pending')}
                 </td>
               </tr>
             ))}

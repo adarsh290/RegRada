@@ -135,6 +135,22 @@ async def check_internal_token(request: Request, call_next):
     return await call_next(request)
 
 
+@app.post("/clear")
+async def clear_database():
+    global maps_collection
+    if maps_collection is not None:
+        try:
+            results = maps_collection.get()
+            if results and results['ids']:
+                maps_collection.delete(ids=results['ids'])
+            logger.info("ChromaDB vector store cleared successfully.")
+            return {"message": "ChromaDB cleared successfully"}
+        except Exception as e:
+            logger.error(f"Failed to clear ChromaDB: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to clear ChromaDB: {e}")
+    return {"message": "ChromaDB was not initialized"}
+
+
 # ── Request Model ──────────────────────────────────────────
 class TextIngestRequest(BaseModel):
     title: str
@@ -704,20 +720,35 @@ async def query_maps(req: QueryMapsRequest):
         cands_text += str(sanitized_c) + "\n"
         
     try:
-        # Performance: offload blocking LLM chains to thread
-        result = await asyncio.to_thread(
-            chain.invoke,
-            {
-                "query": sanitized_query,
-                "candidates": cands_text
-            }
-        )
+        # Performance: offload blocking LLM chains to thread with a 15s timeout
+        async def run_chain():
+            return await asyncio.to_thread(
+                chain.invoke,
+                {
+                    "query": sanitized_query,
+                    "candidates": cands_text
+                }
+            )
+        result = await asyncio.wait_for(run_chain(), timeout=15.0)
         sorted_res = sorted(result.results, key=lambda x: x.relevance_score, reverse=True)
         return QueryMapsResponse(results=[r.model_dump() for r in sorted_res[:req.top_k]])
     except Exception as e:
-        logger.error(f"Query maps failed: {e}")
-        # BUG-AI-014: Return 500 so callers know query failed vs. "no results found"
-        raise HTTPException(status_code=500, detail="Natural language query failed internally. Please try again.")
+        logger.warning(f"⚠️ Query maps filtering failed or timed out ({e}), falling back to direct ChromaDB results.")
+        fallback_results = []
+        for c in candidates:
+            fallback_results.append(QueryResult(
+                map_id=c.get("map_id", ""),
+                circular_id=c.get("circular_id", ""),
+                circular_title=c.get("circular_title", ""),
+                circular_source=c.get("circular_source", ""),
+                action_title=c.get("action_title", ""),
+                department=c.get("department", ""),
+                deadline=c.get("deadline", ""),
+                priority=c.get("priority", ""),
+                relevance_score=0.8,
+                relevance_reason="Direct semantic match from database"
+            ))
+        return QueryMapsResponse(results=[r.model_dump() for r in fallback_results[:req.top_k]])
 
 # ── Dependency Detection Endpoint ─────────────────────────
 

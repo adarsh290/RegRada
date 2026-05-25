@@ -3,9 +3,12 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import User from "../models/User";
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
-if (!JWT_SECRET) {
-  throw new Error("FATAL: JWT_SECRET environment variable is not set.");
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error("FATAL: JWT_SECRET environment variable is not set.");
+  }
+  return secret;
 }
 // BUG-BE2-032: Align JWT expiry with cookie maxAge
 const JWT_EXPIRES_IN = "8h";
@@ -105,7 +108,7 @@ export async function login(req: Request, res: Response) {
 
     const token = jwt.sign(
       { userId: user._id, username: user.username, role: user.role, department_name: user.department_name },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: JWT_EXPIRES_IN, algorithm: "HS256" }
     );
 

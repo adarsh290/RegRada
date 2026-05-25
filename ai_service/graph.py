@@ -102,7 +102,7 @@ def _build_llm(provider: str):
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 temperature=0,
                 api_key=api_key,
-                timeout=60,
+                timeout=300,
             )
             _llm_cache[provider] = (llm, "llm_openai")
             return _llm_cache[provider]
@@ -118,7 +118,7 @@ def _build_llm(provider: str):
                 temperature=0,
                 base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
                 api_key="ollama",
-                timeout=60,
+                timeout=300,
             )
             _llm_cache[provider] = (llm, "llm_local")
             return _llm_cache[provider]

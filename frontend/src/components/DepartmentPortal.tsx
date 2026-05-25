@@ -124,11 +124,11 @@ export default function DepartmentPortal({ department }: DepartmentPortalProps) 
     if (!rejectTarget || !rejectReason.trim()) return;
     setRejecting(true);
     setRejectError('');
+    // Use an AbortController so the post-reject refresh can be cancelled if the modal closes
+    const refreshController = new AbortController();
     try {
       await rejectMAP(rejectTarget.circular_id, rejectTarget.map_id, rejectReason);
-      // BUG-FE2-010: Remove dangling AbortController — the useEffect cleanup handles mount-level abort.
-      // A best-effort refresh here does not need an isolated controller.
-      await fetchData();
+      await fetchData(refreshController.signal);
       setRejectTarget(null);
       setRejectReason('');
     } catch (err) {

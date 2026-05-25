@@ -59,20 +59,50 @@ export async function submitProof(req: Request, res: Response) {
       return;
     }
 
-    // ── Create Submission record ───────────────────────
-    const submission = new Submission({
+    // ── Create or Update Submission record ───────────────
+    let submission = await Submission.findOne({
       circular_id: circular._id,
-      circular_title: circular.title,
       map_id,
-      map_action: map.action_title,
-      department: map.department,
-      proof_files: files.map(f => ({ file_path: f.path, original_filename: path.basename(f.originalname), file_size: f.size })),
-      notes: notes || "",
-      status: "submitted",
-      submitted_at: new Date(),
+      department: map.department
     });
 
+    if (submission) {
+      submission.proof_files = files.map(f => ({ file_path: f.path, original_filename: path.basename(f.originalname), file_size: f.size }));
+      submission.notes = notes || "";
+      submission.status = "submitted";
+      submission.submitted_at = new Date();
+      submission.ai_verdict = undefined;
+    } else {
+      submission = new Submission({
+        circular_id: circular._id,
+        circular_title: circular.title,
+        map_id,
+        map_action: map.action_title,
+        department: map.department,
+        proof_files: files.map(f => ({ file_path: f.path, original_filename: path.basename(f.originalname), file_size: f.size })),
+        notes: notes || "",
+        status: "submitted",
+        submitted_at: new Date(),
+      });
+    }
+
     await submission.save();
+
+    // Update parent Circular MAP status to "submitted" initially
+    await Circular.findOneAndUpdate(
+      { _id: circular._id, "maps.map_id": map_id },
+      { 
+        $set: { "maps.$.status": "submitted" },
+        $push: {
+          "maps.$.audit_trail": {
+            action: "Proof Uploaded",
+            by: user.username || "Department User",
+            comment: notes || "Submitted compliance proof documents.",
+            timestamp: new Date()
+          }
+        }
+      }
+    );
 
     // ── Run AI Validation (concatenate all doc text) ────────────
     console.log(`🤖 Starting AI Validation for ${submission._id} with ${files.length} file(s)...`);
@@ -105,9 +135,27 @@ export async function submitProof(req: Request, res: Response) {
       submission.status = "pending_review"; // BUG-BE2-002: enum now includes pending_review
       await submission.save();
 
-      // BUG-SEC-031: Do NOT auto-update the MAP status from AI verdict
-      // The MAP remains "submitted" until the CO explicitly calls overrideSubmissionVerdict
-      console.log(`🤖 AI verdict advisory: ${verdictData.verdict} (confidence: ${verdictData.confidence}). Awaiting CO review.`);
+      // If the AI verdict is rejected (non-compliant), we auto-reject the MAP so the department knows to re-upload.
+      // If the AI verdict is verified (compliant), we keep the MAP status as "submitted" (awaiting CO review).
+      if (!verdictData.is_compliant) {
+        await Circular.findOneAndUpdate(
+          { _id: circular._id, "maps.map_id": map_id },
+          { 
+            $set: { "maps.$.status": "rejected" },
+            $push: {
+              "maps.$.audit_trail": {
+                action: "AI Evaluated: Non-Compliant",
+                by: "AI Auditor",
+                comment: verdictData.reasoning || "AI evaluation: Proof is non-compliant.",
+                timestamp: new Date()
+              }
+            }
+          }
+        );
+        console.log(`🤖 AI verdict advisory: rejected (confidence: ${verdictData.confidence}). MAP auto-rejected.`);
+      } else {
+        console.log(`🤖 AI verdict advisory: verified (confidence: ${verdictData.confidence}). Awaiting CO review.`);
+      }
     } catch (aiErr: any) {
       console.error("❌ AI Validation failed:", aiErr.message);
       // We don't fail the submission upload if AI validation fails.

@@ -934,20 +934,48 @@ export async function approveMAP(req: Request, res: Response) {
       res.status(400).json({ error: "Invalid Circular ID format" });
       return;
     }
-    // BUG-BE2-009: Replace findById+save with atomic findOneAndUpdate to prevent concurrent approval race
-    // Also adds optimistic concurrency by filtering on "pending_review" status
+
+    // First find the circular and check the map's current status
+    const circular = await Circular.findOne({ _id: circularId, "maps.map_id": mapId });
+    if (!circular) {
+      res.status(404).json({ error: "Circular or MAP not found" });
+      return;
+    }
+
+    const targetMap = circular.maps.find((m) => m.map_id === mapId);
+    if (!targetMap) {
+      res.status(404).json({ error: "MAP not found in circular" });
+      return;
+    }
+
+    let nextStatus = "pending";
+    let comment = "Approved low-confidence MAP for assignment";
+
+    if (targetMap.status === "submitted") {
+      nextStatus = "verified";
+      comment = "Compliance Officer manually approved submission";
+    } else if (targetMap.status === "pending_review") {
+      nextStatus = "pending";
+      comment = "Approved low-confidence MAP for assignment";
+    } else {
+      res.status(400).json({ error: `Cannot approve MAP with status ${targetMap.status}` });
+      return;
+    }
+
+    // Replace findById+save with atomic findOneAndUpdate to prevent concurrent approval race
+    // Also adds optimistic concurrency by filtering on the current status
     const updatedCircular = await Circular.findOneAndUpdate(
-      { _id: circularId, "maps.map_id": mapId, "maps.status": "pending_review" },
+      { _id: circularId, "maps.map_id": mapId, "maps.status": targetMap.status },
       {
         $set: {
-          "maps.$.status": "pending",
+          "maps.$.status": nextStatus,
           "maps.$.needs_co_review": false,
         },
         $push: {
           "maps.$.audit_trail": {
             action: "Review Approved",
             by: (req as any).user?.username || "Compliance Officer",
-            comment: "Approved low-confidence MAP for assignment",
+            comment: comment,
             timestamp: new Date(),
           },
         },
@@ -955,7 +983,7 @@ export async function approveMAP(req: Request, res: Response) {
       { new: true }
     );
     if (!updatedCircular) {
-      res.status(404).json({ error: "MAP not found or not in pending_review status" });
+      res.status(404).json({ error: "MAP status changed or not found during approval" });
       return;
     }
     const updatedMap = updatedCircular.maps.find((m) => m.map_id === mapId);

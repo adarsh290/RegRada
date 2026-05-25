@@ -272,7 +272,7 @@ export default function ComplianceInbox() {
                               <span className={`px-2 py-1 text-[10px] uppercase font-bold rounded border ${getStatusColor(map.status)}`}>
                                 {map.status.replace(/_/g, ' ')}
                               </span>
-                              {map.status === 'pending_review' && user?.role === 'CO' && (
+                              {(map.status === 'submitted' || map.status === 'pending_review') && user?.role === 'CO' && (
                                 <button
                                   onClick={(e) => { e.stopPropagation(); handleApproveMap(circular._id, map.map_id); }}
                                   disabled={approvingId === map.map_id}

@@ -1,9 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
-if (!JWT_SECRET) {
-  throw new Error("FATAL: JWT_SECRET environment variable is not set.");
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error("FATAL: JWT_SECRET environment variable is not set.");
+  }
+  return secret;
 }
 
 export interface AuthPayload {
@@ -37,7 +40,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any as AuthPayload;
+    const decoded = jwt.verify(token, getJwtSecret(), { algorithms: ["HS256"] }) as any as AuthPayload;
     (req as any).user = decoded;
     next();
   } catch (err) {
