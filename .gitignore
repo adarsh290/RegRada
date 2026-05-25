@@ -1,30 +1,49 @@
-# Dependencies
+# ── Dependencies ─────────────────────────────────────────
 node_modules/
 __pycache__/
 *.pyc
+*.pyo
 .venv/
 venv/
 env/
 
-# Build output
+# ── Build Output ──────────────────────────────────────────
 dist/
 build/
 
-# Environment variables
+# ── Environment Variables ─────────────────────────────────
 .env
 .env.local
 .env.*.local
 
-# IDE
+# ── AI / Vector DB ────────────────────────────────────────
+ai_service/chroma_db/
+
+# ── Uploaded Files ────────────────────────────────────────
+backend/uploads/
+
+# ── Test Artifacts ────────────────────────────────────────
+frontend/screenshots/
+frontend/weak_proof.txt
+frontend/strong_proof_encryption.txt
+
+# ── Temporary / Scratch files ─────────────────────────────
+test.json
+browser_tests/
+
+# ── IDE ───────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
+# ── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────
 *.log
 npm-debug.log*
+
+# ── Large Presentation Files ──────────────────────────────
+*.pptx
